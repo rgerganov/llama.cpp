@@ -58,7 +58,10 @@ llama_test(test-tokenizer-1-bpe.cpp    NAME test-tokenizer-1-gpt2             AR
 #llama_test(test-tokenizer-1-bpe.cpp    NAME test-tokenizer-1-bloom            ARGS ${CMAKE_CURRENT_SOURCE_DIR}/../models/ggml-vocab-bloom.gguf) # BIG
 
 llama_test(test-grammar-parser.cpp)
-llama_test(test-llama-grammar.cpp)
+if (NOT LLAMA_RPC)
+    # TODO: this test must be fixed to not include llama.cpp
+    llama_test(test-llama-grammar.cpp)
+endif()
 llama_test(test-grammar-integration.cpp)
 llama_test(test-grad0.cpp)
 # llama_test(test-opt.cpp) # SLOW

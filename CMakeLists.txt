@@ -131,6 +131,7 @@ set(LLAMA_METAL_MACOSX_VERSION_MIN "" CACHE STRING
 set(LLAMA_METAL_STD "" CACHE STRING          "llama: metal standard version (-std flag)")
 option(LLAMA_KOMPUTE                         "llama: use Kompute"                               OFF)
 option(LLAMA_MPI                             "llama: use MPI"                                   OFF)
+option(LLAMA_RPC                             "llama: use RPC"                                   OFF)
 option(LLAMA_QKK_64                          "llama: use super-block size of 64 for k-quants"   OFF)
 option(LLAMA_SYCL                            "llama: use SYCL"                                  OFF)
 option(LLAMA_SYCL_F16                        "llama: use 16 bit floats for sycl calculations"   OFF)
@@ -492,6 +493,45 @@ if (LLAMA_MPI)
     else()
         message(WARNING "MPI not found")
     endif()
+endif()
+
+if (LLAMA_RPC)
+    find_package(protobuf CONFIG REQUIRED)
+    message(STATUS "Using protobuf ${Protobuf_VERSION}")
+    set(_PROTOBUF_LIBPROTOBUF protobuf::libprotobuf)
+    set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
+
+    find_package(gRPC CONFIG REQUIRED)
+    message(STATUS "Using gRPC ${gRPC_VERSION}")
+    set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+
+    # Proto file
+    get_filename_component(ggml_proto "ggml-rpc.proto" ABSOLUTE)
+    get_filename_component(ggml_proto_path "${ggml_proto}" PATH)
+
+    # Generated sources
+    set(ggml_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/ggml-rpc.pb.cc")
+    set(ggml_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/ggml-rpc.pb.h")
+    set(ggml_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/ggml-rpc.grpc.pb.cc")
+    set(ggml_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/ggml-rpc.grpc.pb.h")
+
+    add_custom_command(
+        OUTPUT "${ggml_proto_srcs}" "${ggml_proto_hdrs}" "${ggml_grpc_srcs}" "${ggml_grpc_hdrs}"
+        COMMAND ${_PROTOBUF_PROTOC}
+        ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+            --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+            -I "${ggml_proto_path}"
+            --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+            "${ggml_proto}"
+        DEPENDS "${ggml_proto}")
+
+    set(LLAMA_EXTRA_INCLUDES  ${LLAMA_EXTRA_INCLUDES}  ${CMAKE_CURRENT_BINARY_DIR})
+    set(LLAMA_EXTRA_LIBS      ${LLAMA_EXTRA_LIBS} gRPC::grpc++ gRPC::grpc gRPC::grpc++_reflection ${_PROTOBUF_LIBPROTOBUF})
+
+    add_compile_definitions(GGML_USE_RPC)
+
+    set(GGML_HEADERS_RPC ggml-rpc.h ${ggml_grpc_hdrs} ${ggml_proto_hdrs})
+    set(GGML_SOURCES_RPC ggml-rpc.cpp ${ggml_grpc_srcs} ${ggml_proto_srcs})
 endif()
 
 if (LLAMA_CLBLAST)
@@ -1176,6 +1216,7 @@ add_library(ggml OBJECT
             ${GGML_SOURCES_OPENCL}    ${GGML_HEADERS_OPENCL}
             ${GGML_SOURCES_METAL}     ${GGML_HEADERS_METAL}
             ${GGML_SOURCES_MPI}       ${GGML_HEADERS_MPI}
+            ${GGML_SOURCES_RPC}       ${GGML_HEADERS_RPC}
             ${GGML_SOURCES_EXTRA}     ${GGML_HEADERS_EXTRA}
             ${GGML_SOURCES_SYCL}      ${GGML_HEADERS_SYCL}
             ${GGML_SOURCES_KOMPUTE}   ${GGML_HEADERS_KOMPUTE}

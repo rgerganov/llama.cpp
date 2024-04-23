@@ -10,6 +10,8 @@ extern "C" {
 
 #define GGML_RPC_MAX_SERVERS       16
 
+GGML_API GGML_CALL void ggml_rpc_init(const char * rpc_servers);
+
 // backend API
 GGML_API GGML_CALL ggml_backend_t ggml_backend_rpc_init(int server_id);
 GGML_API GGML_CALL bool ggml_backend_is_rpc(ggml_backend_t backend);

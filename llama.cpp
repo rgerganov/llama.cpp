@@ -14957,6 +14957,16 @@ void llama_numa_init(enum ggml_numa_strategy numa) {
     }
 }
 
+void llama_rpc_init(const char * rpc_servers) {
+#ifdef GGML_USE_RPC
+    ggml_rpc_init(rpc_servers);
+#else
+    if (rpc_servers != nullptr) {
+        LLAMA_LOG_WARN("%s: RPC support is not enabled in this build\n", __func__);
+    }
+#endif
+}
+
 void llama_backend_free(void) {
 #ifdef GGML_USE_MPI
     ggml_mpi_backend_free();

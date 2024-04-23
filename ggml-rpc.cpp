@@ -3,7 +3,7 @@
 #include "ggml-backend-impl.h"
 #include "ggml-rpc.grpc.pb.h"
 
-#ifdef GGML_USE_CUBLAS
+#ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
 #endif
 
@@ -129,7 +129,9 @@ static ggml_tensor * deserialize_tensor(struct ggml_context * ctx, const ggml::T
 
 GGML_CALL static void ggml_backend_rpc_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     UNUSED(buffer);
-    GGML_ASSERT(!ggml_is_quantized(tensor->type) && "quantized tensors not supported");
+    if (ggml_is_quantized(tensor->type)) {
+        GGML_ASSERT(tensor->ne[0] % 512 == 0 && "unsupported quantized tensor");
+    }
 }
 
 GGML_CALL static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -344,11 +346,20 @@ static ggml_backend_i ggml_backend_rpc_interface = {
     /* .event_synchronize       = */ NULL,
 };
 
-// TODO: this should be read from the command line or some configuration file
-static std::vector<std::string> SERVER_ENDPOINTS = {
-    "localhost:50051",
-    "localhost:50052",
-};
+static std::vector<std::string> endpoints;
+
+GGML_API GGML_CALL void ggml_rpc_init(const char * rpc_servers) {
+    endpoints.clear();
+    GGML_ASSERT(rpc_servers != NULL);
+    std::string servers(rpc_servers);
+    size_t pos = 0;
+    while ((pos = servers.find(",")) != std::string::npos) {
+        std::string server = servers.substr(0, pos);
+        endpoints.push_back(server);
+        servers.erase(0, pos + 1);
+    }
+    endpoints.push_back(servers);
+}
 
 static ggml_backend_t instances[GGML_RPC_MAX_SERVERS] = {0};
 
@@ -364,7 +375,7 @@ GGML_CALL ggml_backend_t ggml_backend_rpc_init(int server_id) {
     if (instances[server_id]) {
         return instances[server_id];
     }
-    std::string endpoint = SERVER_ENDPOINTS[server_id];
+    std::string endpoint = endpoints[server_id];
     GGML_PRINT_DEBUG("Connecting to %s\n", endpoint.c_str());
     auto channel = grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials());
     std::shared_ptr<ggml::Backend::Stub> stub = ggml::Backend::NewStub(channel);
@@ -400,14 +411,14 @@ GGML_API GGML_CALL bool ggml_backend_is_rpc(ggml_backend_t backend) {
 }
 
 GGML_API GGML_CALL int ggml_backend_rpc_get_server_count(void) {
-    return SERVER_ENDPOINTS.size();
+    return endpoints.size();
 }
 
 // Server-side implementation of the RPC backend
 
 BackendImpl::BackendImpl() {
     // the RPC backend simply delegates to one of the existing backends
-#ifdef GGML_USE_CUBLAS
+#ifdef GGML_USE_CUDA
     fprintf(stderr, "%s: using CUDA backend\n", __func__);
     backend = ggml_backend_cuda_init(0); // init device 0
     if (!backend) {

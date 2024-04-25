@@ -540,6 +540,7 @@ grpc::Status BackendImpl::CopyTensor(grpc::ServerContext* context, const ggml::C
 static struct ggml_tensor * create_node(uint64_t id,
                                         struct ggml_context * ctx,
                                         const ggml::GraphComputeRequest* request,
+                                        const std::unordered_map<uint64_t, int> & tensor_ind,
                                         std::unordered_map<uint64_t, struct ggml_tensor*> & tensor_map) {
     if (id == 0) {
         return nullptr;
@@ -547,21 +548,16 @@ static struct ggml_tensor * create_node(uint64_t id,
     if (tensor_map.find(id) != tensor_map.end()) {
         return tensor_map[id];
     }
-    for (int i = 0; i < request->tensors_size(); i++) {
-        if (request->tensors(i).id() == id) {
-            const ggml::Tensor & protobuf_tensor = request->tensors(i);
-            struct ggml_tensor * result = deserialize_tensor(ctx, protobuf_tensor);
-            tensor_map[id] = result;
-            for (int i = 0; i < GGML_MAX_SRC; i++) {
-                result->src[i] = create_node(protobuf_tensor.src(i), ctx, request, tensor_map);
-            }
-            result->view_src = create_node(protobuf_tensor.view_src(), ctx, request, tensor_map);
-            result->view_offs = protobuf_tensor.view_offs();
-            return result;
-        }
+    int ind = tensor_ind.at(id);
+    const ggml::Tensor & protobuf_tensor = request->tensors(ind);
+    struct ggml_tensor * result = deserialize_tensor(ctx, protobuf_tensor);
+    tensor_map[id] = result;
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        result->src[i] = create_node(protobuf_tensor.src(i), ctx, request, tensor_ind, tensor_map);
     }
-    GGML_ASSERT(false && "tensor not found");
-    return nullptr;
+    result->view_src = create_node(protobuf_tensor.view_src(), ctx, request, tensor_ind, tensor_map);
+    result->view_offs = protobuf_tensor.view_offs();
+    return result;
 }
 
 grpc::Status BackendImpl::GraphCompute(grpc::ServerContext* context, const ggml::GraphComputeRequest* request, ggml::GraphComputeReply* reply) {
@@ -574,7 +570,10 @@ grpc::Status BackendImpl::GraphCompute(grpc::ServerContext* context, const ggml:
             /*.no_alloc   =*/ true,
     };
     struct ggml_context * ctx = ggml_init(params);
-    std::unordered_map<uint64_t, ggml_tensor*> tensor_map;
+    std::unordered_map<uint64_t, int> tensor_ind;
+    for (int i = 0; i < num_tensors; i++) {
+        tensor_ind[request->tensors(i).id()] = i;
+    }
 
     int num_nodes = request->nodes_size();
     static size_t buf_size = ggml_tensor_overhead()*num_nodes + ggml_graph_overhead();
@@ -589,8 +588,9 @@ grpc::Status BackendImpl::GraphCompute(grpc::ServerContext* context, const ggml:
     struct ggml_context * ctx0 = ggml_init(params0);
     struct ggml_cgraph * graph = ggml_new_graph_custom(ctx0, num_nodes, false);
     graph->n_nodes = num_nodes;
+    std::unordered_map<uint64_t, ggml_tensor*> tensor_map;
     for (int i = 0; i < num_nodes; i++) {
-        graph->nodes[i] = create_node(request->nodes(i), ctx, request, tensor_map);
+        graph->nodes[i] = create_node(request->nodes(i), ctx, request, tensor_ind, tensor_map);
     }
     ggml_status status = ggml_backend_graph_compute(backend, graph);
     reply->set_status(status);

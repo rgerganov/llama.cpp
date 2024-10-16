@@ -96,6 +96,35 @@ enum rpc_cmd {
     RPC_CMD_COUNT,
 };
 
+struct request_alloc_buffer {
+    uint64_t size;
+};
+
+struct response_alloc_buffer {
+    uint64_t ptr;
+    uint64_t size;
+};
+
+struct response_get_alignment {
+    uint64_t alignment;
+};
+
+struct response_get_max_size {
+    uint64_t max_size;
+};
+
+struct request_buffer_get_base {
+    uint64_t remote_ptr;
+};
+
+struct response_buffer_get_base {
+    uint64_t base_ptr;
+};
+
+struct request_free_buffer {
+    uint64_t remote_ptr;
+};
+
 // RPC data structures
 
 static ggml_guid_t ggml_backend_rpc_guid() {
@@ -279,6 +308,101 @@ static bool send_rpc_cmd(const std::shared_ptr<socket_t> & sock, enum rpc_cmd cm
     return true;
 }
 
+static bool send_request_alloc_buffer(const std::shared_ptr<socket_t> & sock, const request_alloc_buffer & request, response_alloc_buffer & response) {
+    // serialization format: | size (8 bytes) |
+    int input_size = sizeof(uint64_t);
+    std::vector<uint8_t> input(input_size, 0);
+    memcpy(input.data(), &request.size, sizeof(request.size));
+    std::vector<uint8_t> output;
+    bool status = send_rpc_cmd(sock, RPC_CMD_ALLOC_BUFFER, input, output);
+    if (!status) {
+        return false;
+    }
+    GGML_ASSERT(output.size() == 2*sizeof(uint64_t));
+    // output serialization format: | ptr (8 bytes) | size (8 bytes) |
+    memcpy(&response.ptr, output.data(), sizeof(response.ptr));
+    memcpy(&response.size, output.data() + sizeof(response.ptr), sizeof(response.size));
+    return true;
+}
+
+static bool send_request_get_alignment(const std::shared_ptr<socket_t> & sock, response_get_alignment & response) {
+    std::vector<uint8_t> input;
+    std::vector<uint8_t> output;
+    bool status = send_rpc_cmd(sock, RPC_CMD_GET_ALIGNMENT, input, output);
+    if (!status) {
+        return false;
+    }
+    GGML_ASSERT(output.size() == sizeof(uint64_t));
+    // output serialization format: | alignment (8 bytes) |
+    memcpy(&response.alignment, output.data(), sizeof(response.alignment));
+    return true;
+}
+
+static bool send_request_get_max_size(const std::shared_ptr<socket_t> & sock, response_get_max_size & response) {
+    std::vector<uint8_t> input;
+    std::vector<uint8_t> output;
+    bool status = send_rpc_cmd(sock, RPC_CMD_GET_MAX_SIZE, input, output);
+    if (!status) {
+        return false;
+    }
+    GGML_ASSERT(output.size() == sizeof(uint64_t));
+    // output serialization format: | max_size (8 bytes) |
+    memcpy(&response.max_size, output.data(), sizeof(response.max_size));
+    return true;
+}
+
+static bool send_request_buffer_get_base(const std::shared_ptr<socket_t> & sock, const request_buffer_get_base & request, response_buffer_get_base & response) {
+    // serialization format: | remote_ptr (8 bytes) |
+    int input_size = sizeof(uint64_t);
+    std::vector<uint8_t> input(input_size, 0);
+    memcpy(input.data(), &request.remote_ptr, sizeof(request.remote_ptr));
+    std::vector<uint8_t> output;
+    bool status = send_rpc_cmd(sock, RPC_CMD_BUFFER_GET_BASE, input, output);
+    if (!status) {
+        return false;
+    }
+    GGML_ASSERT(output.size() == sizeof(uint64_t));
+    // output serialization format: | base_ptr (8 bytes) |
+    memcpy(&response.base_ptr, output.data(), sizeof(response.base_ptr));
+    return true;
+}
+
+static bool send_response_alloc_buffer(sockfd_t sockfd, const response_alloc_buffer & response) {
+    // serialization format: | ptr (8 bytes) | size (8 bytes) |
+    int output_size = 2*sizeof(uint64_t);
+    std::vector<uint8_t> output(output_size, 0);
+    memcpy(output.data(), &response.ptr, sizeof(response.ptr));
+    memcpy(output.data() + sizeof(response.ptr), &response.size, sizeof(response.size));
+    return send_data(sockfd, output.data(), output_size);
+}
+
+static bool send_request_free_buffer(const std::shared_ptr<socket_t> & sock, const request_free_buffer & request) {
+    // serialization format: | remote_ptr (8 bytes) |
+    int input_size = sizeof(uint64_t);
+    std::vector<uint8_t> input(input_size, 0);
+    memcpy(input.data(), &request.remote_ptr, sizeof(request.remote_ptr));
+    std::vector<uint8_t> output;
+    bool status = send_rpc_cmd(sock, RPC_CMD_FREE_BUFFER, input, output);
+    GGML_ASSERT(output.empty());
+    return status;
+}
+
+static bool recv_request_alloc_buffer(sockfd_t sockfd, request_alloc_buffer & request) {
+    // serialization format: | size (8 bytes) |
+    std::vector<uint8_t> input;
+    uint64_t input_size;
+    if (!recv_data(sockfd, &input_size, sizeof(input_size))) {
+        return false;
+    }
+    if (input_size != sizeof(request.size)) {
+        return false;
+    }
+    if (!recv_data(sockfd, &request.size, sizeof(request.size))) {
+        return false;
+    }
+    return true;
+}
+
 // RPC client-side implementation
 
 static std::shared_ptr<socket_t> get_socket(const std::string & endpoint) {
@@ -326,14 +450,10 @@ static const char * ggml_backend_rpc_buffer_get_name(ggml_backend_buffer_t buffe
 
 static void ggml_backend_rpc_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
-    // input serialization format: | remote_ptr (8 bytes) |
-    std::vector<uint8_t> input(sizeof(uint64_t), 0);
-    uint64_t remote_ptr = ctx->remote_ptr;
-    memcpy(input.data(), &remote_ptr, sizeof(remote_ptr));
-    std::vector<uint8_t> output;
-    bool status = send_rpc_cmd(ctx->sock, RPC_CMD_FREE_BUFFER, input, output);
+    request_free_buffer request;
+    request.remote_ptr = ctx->remote_ptr;
+    bool status = send_request_free_buffer(ctx->sock, request);
     GGML_ASSERT(status);
-    GGML_ASSERT(output.empty());
     delete ctx;
 }
 
@@ -342,18 +462,12 @@ static void * ggml_backend_rpc_buffer_get_base(ggml_backend_buffer_t buffer) {
     if (ctx->base_cache.find(buffer) != ctx->base_cache.end()) {
         return ctx->base_cache[buffer];
     }
-    // input serialization format: | remote_ptr (8 bytes) |
-    std::vector<uint8_t> input(sizeof(uint64_t), 0);
-    uint64_t remote_ptr = ctx->remote_ptr;
-    memcpy(input.data(), &remote_ptr, sizeof(remote_ptr));
-    std::vector<uint8_t> output;
-    bool status = send_rpc_cmd(ctx->sock, RPC_CMD_BUFFER_GET_BASE, input, output);
+    request_buffer_get_base request;
+    request.remote_ptr = ctx->remote_ptr;
+    response_buffer_get_base response;
+    bool status = send_request_buffer_get_base(ctx->sock, request, response);
     GGML_ASSERT(status);
-    GGML_ASSERT(output.size() == sizeof(uint64_t));
-    // output serialization format: | base_ptr (8 bytes) |
-    uint64_t base_ptr;
-    memcpy(&base_ptr, output.data(), sizeof(base_ptr));
-    void * base = reinterpret_cast<void *>(base_ptr);
+    void * base = reinterpret_cast<void *>(response.base_ptr);
     ctx->base_cache[buffer] = base;
     return base;
 }
@@ -484,25 +598,17 @@ static const char * ggml_backend_rpc_buffer_type_name(ggml_backend_buffer_type_t
 
 static ggml_backend_buffer_t ggml_backend_rpc_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
     ggml_backend_rpc_buffer_type_context * buft_ctx = (ggml_backend_rpc_buffer_type_context *)buft->context;
-    // input serialization format: | size (8 bytes) |
-    int input_size = sizeof(uint64_t);
-    std::vector<uint8_t> input(input_size, 0);
-    memcpy(input.data(), &size, sizeof(size));
-    std::vector<uint8_t> output;
+    request_alloc_buffer request;
+    request.size = size;
+    response_alloc_buffer response;
     auto sock = get_socket(buft_ctx->endpoint);
-    bool status = send_rpc_cmd(sock, RPC_CMD_ALLOC_BUFFER, input, output);
+    bool status = send_request_alloc_buffer(sock, request, response);
     GGML_ASSERT(status);
-    GGML_ASSERT(output.size() == 2*sizeof(uint64_t));
-    // output serialization format: | remote_ptr (8 bytes) | remote_size (8 bytes) |
-    uint64_t remote_ptr;
-    memcpy(&remote_ptr, output.data(), sizeof(remote_ptr));
-    size_t remote_size;
-    memcpy(&remote_size, output.data() + sizeof(uint64_t), sizeof(remote_size));
-    if (remote_ptr != 0) {
+    if (response.ptr != 0) {
         ggml_backend_buffer_t buffer = ggml_backend_buffer_init(buft,
             ggml_backend_rpc_buffer_interface,
-            new ggml_backend_rpc_buffer_context{sock, {}, remote_ptr, "RPC[" + std::string(buft_ctx->endpoint) + "]"},
-            remote_size);
+            new ggml_backend_rpc_buffer_context{sock, {}, response.ptr, "RPC[" + std::string(buft_ctx->endpoint) + "]"},
+            response.size);
         return buffer;
     } else {
         return nullptr;
@@ -510,16 +616,10 @@ static ggml_backend_buffer_t ggml_backend_rpc_buffer_type_alloc_buffer(ggml_back
 }
 
 static size_t get_alignment(const std::shared_ptr<socket_t> & sock) {
-    // input serialization format: | 0 bytes |
-    std::vector<uint8_t> input;
-    std::vector<uint8_t> output;
-    bool status = send_rpc_cmd(sock, RPC_CMD_GET_ALIGNMENT, input, output);
+    response_get_alignment response;
+    bool status = send_request_get_alignment(sock, response);
     GGML_ASSERT(status);
-    GGML_ASSERT(output.size() == sizeof(uint64_t));
-    // output serialization format: | alignment (8 bytes) |
-    uint64_t alignment;
-    memcpy(&alignment, output.data(), sizeof(alignment));
-    return alignment;
+    return response.alignment;
 }
 
 static size_t ggml_backend_rpc_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
@@ -528,16 +628,10 @@ static size_t ggml_backend_rpc_buffer_type_get_alignment(ggml_backend_buffer_typ
 }
 
 static size_t get_max_size(const std::shared_ptr<socket_t> & sock) {
-    // input serialization format: | 0 bytes |
-    std::vector<uint8_t> input;
-    std::vector<uint8_t> output;
-    bool status = send_rpc_cmd(sock, RPC_CMD_GET_MAX_SIZE, input, output);
+    response_get_max_size response;
+    bool status = send_request_get_max_size(sock, response);
     GGML_ASSERT(status);
-    GGML_ASSERT(output.size() == sizeof(uint64_t));
-    // output serialization format: | max_size (8 bytes) |
-    uint64_t max_size;
-    memcpy(&max_size, output.data(), sizeof(max_size));
-    return max_size;
+    return response.max_size;
 }
 
 static size_t ggml_backend_rpc_get_max_size(ggml_backend_buffer_type_t buft) {
@@ -734,7 +828,7 @@ public:
     rpc_server(ggml_backend_t backend) : backend(backend) {}
     ~rpc_server();
 
-    bool alloc_buffer(const std::vector<uint8_t> & input, std::vector<uint8_t> & output);
+    bool alloc_buffer(const request_alloc_buffer & request, response_alloc_buffer & response);
     void get_alignment(std::vector<uint8_t> & output);
     void get_max_size(std::vector<uint8_t> & output);
     bool buffer_get_base(const std::vector<uint8_t> & input, std::vector<uint8_t> & output);
@@ -757,29 +851,19 @@ private:
     std::unordered_set<ggml_backend_buffer_t> buffers;
 };
 
-bool rpc_server::alloc_buffer(const std::vector<uint8_t> & input, std::vector<uint8_t> & output) {
-    // input serialization format: | size (8 bytes) |
-    if (input.size() != sizeof(uint64_t)) {
-        return false;
-    }
-    uint64_t size;
-    memcpy(&size, input.data(), sizeof(size));
+bool rpc_server::alloc_buffer(const request_alloc_buffer & request, response_alloc_buffer & response) {
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
-    ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, size);
-    uint64_t remote_ptr = 0;
-    uint64_t remote_size = 0;
+    ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, request.size);
+    response.ptr = 0;
+    response.size = 0;
     if (buffer != nullptr) {
-        remote_ptr = reinterpret_cast<uint64_t>(buffer);
-        remote_size = buffer->size;
-        GGML_PRINT_DEBUG("[%s] size: %" PRIu64 " -> remote_ptr: %" PRIx64 ", remote_size: %" PRIu64 "\n", __func__, size, remote_ptr, remote_size);
+        response.ptr = reinterpret_cast<uint64_t>(buffer);
+        response.size = buffer->size;
+        GGML_PRINT_DEBUG("[%s] size: %" PRIu64 " -> remote_ptr: %" PRIx64 ", remote_size: %" PRIu64 "\n", __func__, size, response.ptr, response.size);
         buffers.insert(buffer);
     } else {
         GGML_PRINT_DEBUG("[%s] size: %" PRIu64 " -> failed\n", __func__, size);
     }
-    // output serialization format: | remote_ptr (8 bytes) | remote_size (8 bytes) |
-    output.resize(2*sizeof(uint64_t), 0);
-    memcpy(output.data(), &remote_ptr, sizeof(remote_ptr));
-    memcpy(output.data() + sizeof(uint64_t), &remote_size, sizeof(remote_size));
     return true;
 }
 
@@ -1091,85 +1175,102 @@ static void rpc_serve_client(ggml_backend_t backend, sockfd_t sockfd, size_t fre
             fprintf(stderr, "Unknown command: %d\n", cmd);
             break;
         }
-        std::vector<uint8_t> input;
-        std::vector<uint8_t> output;
-        uint64_t input_size;
-        if (!recv_data(sockfd, &input_size, sizeof(input_size))) {
-            break;
-        }
-        try {
-            input.resize(input_size);
-        } catch (const std::bad_alloc & e) {
-            fprintf(stderr, "Failed to allocate input buffer of size %" PRIu64 "\n", input_size);
-            break;
-        }
-        if (!recv_data(sockfd, input.data(), input_size)) {
-            break;
-        }
-        bool ok = true;
         switch (cmd) {
             case RPC_CMD_ALLOC_BUFFER: {
-                ok = server.alloc_buffer(input, output);
-                break;
+                request_alloc_buffer request;
+                response_alloc_buffer response;
+                if (!recv_request_alloc_buffer(sockfd, request)) {
+                    break;
+                }
+                if (!server.alloc_buffer(request, response)) {
+                    break;
+                }
+                if (!send_response_alloc_buffer(sockfd, response)) {
+                    break;
+                }
             }
-            case RPC_CMD_GET_ALIGNMENT: {
-                server.get_alignment(output);
-                break;
-            }
-            case RPC_CMD_GET_MAX_SIZE: {
-                server.get_max_size(output);
-                break;
-            }
-            case RPC_CMD_BUFFER_GET_BASE: {
-                ok = server.buffer_get_base(input, output);
-                break;
-            }
-            case RPC_CMD_FREE_BUFFER: {
-                ok = server.free_buffer(input);
-                break;
-            }
-            case RPC_CMD_BUFFER_CLEAR: {
-                ok = server.buffer_clear(input);
-                break;
-            }
-            case RPC_CMD_SET_TENSOR: {
-                ok = server.set_tensor(input);
-                break;
-            }
-            case RPC_CMD_GET_TENSOR: {
-                ok = server.get_tensor(input, output);
-                break;
-            }
-            case RPC_CMD_COPY_TENSOR: {
-                ok = server.copy_tensor(input, output);
-                break;
-            }
-            case RPC_CMD_GRAPH_COMPUTE: {
-                ok = server.graph_compute(input, output);
-                break;
-            }
-            case RPC_CMD_GET_DEVICE_MEMORY: {
-                // output serialization format: | free (8 bytes) | total (8 bytes) |
-                output.resize(2*sizeof(uint64_t), 0);
-                memcpy(output.data(), &free_mem, sizeof(free_mem));
-                memcpy(output.data() + sizeof(uint64_t), &total_mem, sizeof(total_mem));
-                break;
-            }
-            default: {
-                fprintf(stderr, "Unknown command: %d\n", cmd);
-                ok = false;
-            }
+            // TODO ...
         }
-        if (!ok) {
-            break;
-        }
-        uint64_t output_size = output.size();
-        if (!send_data(sockfd, &output_size, sizeof(output_size))) {
-            break;
-        }
-        if (!send_data(sockfd, output.data(), output_size)) {
-            break;
-        }
+
+        // std::vector<uint8_t> input;
+        // std::vector<uint8_t> output;
+        // uint64_t input_size;
+        // if (!recv_data(sockfd, &input_size, sizeof(input_size))) {
+        //     break;
+        // }
+        // try {
+        //     input.resize(input_size);
+        // } catch (const std::bad_alloc & e) {
+        //     fprintf(stderr, "Failed to allocate input buffer of size %" PRIu64 "\n", input_size);
+        //     break;
+        // }
+        // if (!recv_data(sockfd, input.data(), input_size)) {
+        //     break;
+        // }
+        // bool ok = true;
+        // switch (cmd) {
+        //     case RPC_CMD_ALLOC_BUFFER: {
+        //         ok = server.alloc_buffer(input, output);
+        //         break;
+        //     }
+        //     case RPC_CMD_GET_ALIGNMENT: {
+        //         server.get_alignment(output);
+        //         break;
+        //     }
+        //     case RPC_CMD_GET_MAX_SIZE: {
+        //         server.get_max_size(output);
+        //         break;
+        //     }
+        //     case RPC_CMD_BUFFER_GET_BASE: {
+        //         ok = server.buffer_get_base(input, output);
+        //         break;
+        //     }
+        //     case RPC_CMD_FREE_BUFFER: {
+        //         ok = server.free_buffer(input);
+        //         break;
+        //     }
+        //     case RPC_CMD_BUFFER_CLEAR: {
+        //         ok = server.buffer_clear(input);
+        //         break;
+        //     }
+        //     case RPC_CMD_SET_TENSOR: {
+        //         ok = server.set_tensor(input);
+        //         break;
+        //     }
+        //     case RPC_CMD_GET_TENSOR: {
+        //         ok = server.get_tensor(input, output);
+        //         break;
+        //     }
+        //     case RPC_CMD_COPY_TENSOR: {
+        //         ok = server.copy_tensor(input, output);
+        //         break;
+        //     }
+        //     case RPC_CMD_GRAPH_COMPUTE: {
+        //         ok = server.graph_compute(input, output);
+        //         break;
+        //     }
+        //     case RPC_CMD_GET_DEVICE_MEMORY: {
+        //         // output serialization format: | free (8 bytes) | total (8 bytes) |
+        //         output.resize(2*sizeof(uint64_t), 0);
+        //         memcpy(output.data(), &free_mem, sizeof(free_mem));
+        //         memcpy(output.data() + sizeof(uint64_t), &total_mem, sizeof(total_mem));
+        //         break;
+        //     }
+        //     default: {
+        //         fprintf(stderr, "Unknown command: %d\n", cmd);
+        //         ok = false;
+        //     }
+        // }
+        // if (!ok) {
+        //     break;
+        // }
+        // uint64_t output_size = output.size();
+        // if (!send_data(sockfd, &output_size, sizeof(output_size))) {
+        //     break;
+        // }
+        // if (!send_data(sockfd, output.data(), output_size)) {
+        //     break;
+        // }
     }
 }
 

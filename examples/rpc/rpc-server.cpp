@@ -24,20 +24,26 @@
 #endif
 #include <string>
 #include <stdio.h>
+#include <vector>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 struct rpc_server_params {
-    std::string host        = "127.0.0.1";
-    int         port        = 50052;
-    size_t      backend_mem = 0;
+    std::string              host        = "127.0.0.1";
+    int                      port        = 50052;
+    size_t                   backend_mem = 0;
+    std::string              cache_dir   = "";
 };
 
 static void print_usage(int /*argc*/, char ** argv, rpc_server_params params) {
     fprintf(stderr, "Usage: %s [options]\n\n", argv[0]);
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "  -h, --help            show this help message and exit\n");
-    fprintf(stderr, "  -H HOST, --host HOST  host to bind to (default: %s)\n", params.host.c_str());
-    fprintf(stderr, "  -p PORT, --port PORT  port to bind to (default: %d)\n", params.port);
-    fprintf(stderr, "  -m MEM, --mem MEM     backend memory size (in MB)\n");
+    fprintf(stderr, "  -h, --help                show this help message and exit\n");
+    fprintf(stderr, "  -H HOST, --host HOST      host to bind to (default: %s)\n", params.host.c_str());
+    fprintf(stderr, "  -p PORT, --port PORT      port to bind to (default: %d)\n", params.port);
+    fprintf(stderr, "  -d DIR,  --cache-dir DIR  local cache dir\n");
+    fprintf(stderr, "  -m MEM,  --mem MEM        backend memory size (in MB)\n");
     fprintf(stderr, "\n");
 }
 
@@ -58,6 +64,16 @@ static bool rpc_server_params_parse(int argc, char ** argv, rpc_server_params & 
             if (params.port <= 0 || params.port > 65535) {
                 return false;
             }
+        } else if (arg == "-d" || arg == "--cache-dir") {
+            if (++i >= argc) {
+                return false;
+            }
+            fs::path cache_dir(argv[i]);
+            if (!fs::is_directory(cache_dir)) {
+                fprintf(stderr, "error: cache dir does not exist: %s\n", cache_dir.c_str());
+                return false;
+            }
+            params.cache_dir = argv[i];
         } else if (arg == "-m" || arg == "--mem") {
             if (++i >= argc) {
                 return false;
@@ -164,8 +180,12 @@ int main(int argc, char * argv[]) {
     } else {
         get_backend_memory(&free_mem, &total_mem);
     }
-    printf("Starting RPC server on %s, backend memory: %zu MB\n", endpoint.c_str(), free_mem / (1024 * 1024));
-    ggml_backend_rpc_start_server(backend, endpoint.c_str(), free_mem, total_mem);
+    const char * cache_dir = params.cache_dir.empty() ? nullptr : params.cache_dir.c_str();
+    printf("Starting RPC server\n");
+    printf("  endpoint       : %s\n", endpoint.c_str());
+    printf("  local cache    : %s\n", cache_dir ? cache_dir : "n/a");
+    printf("  backend memory : %zu MB\n", free_mem / (1024 * 1024));
+    ggml_backend_rpc_start_server(backend, endpoint.c_str(), cache_dir, free_mem, total_mem);
     ggml_backend_free(backend);
     return 0;
 }

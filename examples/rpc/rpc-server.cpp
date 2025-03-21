@@ -24,20 +24,30 @@
 #endif
 #include <string>
 #include <stdio.h>
+#include <vector>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+const int MAX_GGUF_PATH = 16;
 
 struct rpc_server_params {
-    std::string host        = "127.0.0.1";
-    int         port        = 50052;
-    size_t      backend_mem = 0;
+    std::string              host        = "127.0.0.1";
+    int                      port        = 50052;
+    size_t                   backend_mem = 0;
+    std::string              cache_dir   = "";
+    std::vector<std::string> gguf_path;
 };
 
 static void print_usage(int /*argc*/, char ** argv, rpc_server_params params) {
     fprintf(stderr, "Usage: %s [options]\n\n", argv[0]);
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "  -h, --help            show this help message and exit\n");
-    fprintf(stderr, "  -H HOST, --host HOST  host to bind to (default: %s)\n", params.host.c_str());
-    fprintf(stderr, "  -p PORT, --port PORT  port to bind to (default: %d)\n", params.port);
-    fprintf(stderr, "  -m MEM, --mem MEM     backend memory size (in MB)\n");
+    fprintf(stderr, "  -h, --help               show this help message and exit\n");
+    fprintf(stderr, "  -H HOST, --host HOST     host to bind to (default: %s)\n", params.host.c_str());
+    fprintf(stderr, "  -p PORT, --port PORT     port to bind to (default: %d)\n", params.port);
+    fprintf(stderr, "  -f PATH, --gguf PATH     path to GGUF file\n");
+    fprintf(stderr, "  -d DIR, --cache-dir DIR  local cache dir\n");
+    fprintf(stderr, "  -m MEM, --mem MEM        backend memory size (in MB)\n");
     fprintf(stderr, "\n");
 }
 
@@ -58,6 +68,30 @@ static bool rpc_server_params_parse(int argc, char ** argv, rpc_server_params & 
             if (params.port <= 0 || params.port > 65535) {
                 return false;
             }
+        } else if (arg == "-f" || arg == "--gguf") {
+            if (++i >= argc) {
+                return false;
+            }
+            if (params.gguf_path.size() >= MAX_GGUF_PATH) {
+                fprintf(stderr, "error: too many GGUF files\n");
+                return false;
+            }
+            fs::path gguf_path(argv[i]);
+            if (!fs::is_regular_file(gguf_path)) {
+                fprintf(stderr, "error: GGUF file does not exist: %s\n", gguf_path.c_str());
+                return false;
+            }
+            params.gguf_path.push_back(argv[i]);
+        } else if (arg == "-d" || arg == "--cache-dir") {
+            if (++i >= argc) {
+                return false;
+            }
+            fs::path cache_dir(argv[i]);
+            if (!fs::is_directory(cache_dir)) {
+                fprintf(stderr, "error: cache dir does not exist: %s\n", cache_dir.c_str());
+                return false;
+            }
+            params.cache_dir = argv[i];
         } else if (arg == "-m" || arg == "--mem") {
             if (++i >= argc) {
                 return false;
@@ -164,8 +198,14 @@ int main(int argc, char * argv[]) {
     } else {
         get_backend_memory(&free_mem, &total_mem);
     }
+    const char * gguf_path[MAX_GGUF_PATH] = {0};
+    int n_gguf_path = params.gguf_path.size();
+    for (int i = 0; i < n_gguf_path; i++) {
+        gguf_path[i] = params.gguf_path[i].c_str();
+    }
+    const char * cache_dir = params.cache_dir.empty() ? nullptr : params.cache_dir.c_str();
     printf("Starting RPC server on %s, backend memory: %zu MB\n", endpoint.c_str(), free_mem / (1024 * 1024));
-    ggml_backend_rpc_start_server(backend, endpoint.c_str(), free_mem, total_mem);
+    ggml_backend_rpc_start_server(backend, endpoint.c_str(), cache_dir, n_gguf_path, gguf_path, free_mem, total_mem);
     ggml_backend_free(backend);
     return 0;
 }

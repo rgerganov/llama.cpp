@@ -1,3 +1,7 @@
+#if defined(_MSC_VER)
+#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+#endif
+
 #include "ggml-cpu.h"
 
 #ifdef GGML_USE_CUDA
@@ -28,6 +32,7 @@
 #  include <unistd.h>
 #  include <sys/stat.h>
 #endif
+#include <codecvt>
 #include <string>
 #include <stdio.h>
 #include <vector>
@@ -35,7 +40,7 @@
 
 namespace fs = std::filesystem;
 
-// NOTE: this is copied from common.cpp to avoid linking with libllama
+// NOTE: this is copied from common.cpp to avoid linking with libcommon
 // returns true if successful, false otherwise
 static bool fs_create_directory_with_parents(const std::string & path) {
 #ifdef _WIN32
@@ -108,7 +113,7 @@ static bool fs_create_directory_with_parents(const std::string & path) {
 #endif // _WIN32
 }
 
-// NOTE: this is copied from common.cpp to avoid linking with libllama
+// NOTE: this is copied from common.cpp to avoid linking with libcommon
 static std::string fs_get_cache_directory() {
     std::string cache_directory = "";
     auto ensure_trailing_slash = [](std::string p) {

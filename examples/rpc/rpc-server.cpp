@@ -19,7 +19,10 @@
 #include "ggml-rpc.h"
 #ifdef _WIN32
 #  define DIRECTORY_SEPARATOR '\\'
+#  include <locale>
 #  include <windows.h>
+#  include <fcntl.h>
+#  include <io.h>
 #else
 #  define DIRECTORY_SEPARATOR '/'
 #  include <unistd.h>

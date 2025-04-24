@@ -597,6 +597,21 @@ static bool ggml_backend_rpc_buffer_cpy_tensor(ggml_backend_buffer_t buffer, con
     return response.result;
 }
 
+bool ggml_backend_rpc_buffer_load_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, size_t offset, uint64_t hash) {
+    ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
+    rpc_tensor rpc_tensor = serialize_tensor(tensor);
+    // input serialization format: | rpc_tensor | offset (8 bytes) | hash (8 bytes)
+    size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + sizeof(uint64_t);
+    std::vector<uint8_t> input(input_size, 0);
+    memcpy(input.data(), &rpc_tensor, sizeof(rpc_tensor));
+    memcpy(input.data() + sizeof(rpc_tensor), &offset, sizeof(offset));
+    memcpy(input.data() + sizeof(rpc_tensor) + sizeof(offset), &hash, sizeof(hash));
+    rpc_msg_set_tensor_hash_rsp response;
+    bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR_HASH, input.data(), input.size(), &response, sizeof(response));
+    GGML_ASSERT(status);
+    return response.result;
+}
+
 static void ggml_backend_rpc_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
     rpc_msg_buffer_clear_req request = {ctx->remote_ptr, value};
@@ -1747,6 +1762,8 @@ static ggml_backend_dev_t ggml_backend_rpc_reg_get_device(ggml_backend_reg_t reg
 static void * ggml_backend_rpc_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     if (std::strcmp(name, "ggml_backend_rpc_add_device") == 0) {
         return (void *)ggml_backend_rpc_add_device;
+    } else if (std::strcmp(name, "ggml_backend_rpc_buffer_load_tensor") == 0) {
+        return (void *)ggml_backend_rpc_buffer_load_tensor;
     }
     return NULL;
 

@@ -27,6 +27,8 @@ GGML_BACKEND_API void ggml_backend_rpc_start_server(ggml_backend_t backend, cons
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_reg(void);
 
 GGML_BACKEND_API ggml_backend_dev_t ggml_backend_rpc_add_device(const char * endpoint);
+GGML_BACKEND_API bool ggml_backend_rpc_buffer_load_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor,
+                                                          size_t offset, uint64_t hash);
 
 #ifdef  __cplusplus
 }

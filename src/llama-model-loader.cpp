@@ -376,6 +376,7 @@ namespace GGUFMeta {
     template bool llama_model_loader::get_key<bool>       (enum llm_kv kid, bool & result,        bool required);
     template bool llama_model_loader::get_key<float>      (enum llm_kv kid, float & result,       bool required);
     template bool llama_model_loader::get_key<uint32_t>   (enum llm_kv kid, uint32_t & result,    bool required);
+    template bool llama_model_loader::get_key<uint64_t>   (enum llm_kv kid, uint64_t & result,    bool required);
     template bool llama_model_loader::get_key<std::string>(enum llm_kv kid, std::string & result, bool required);
 
     template<>
@@ -688,6 +689,10 @@ llama_model_loader::llama_model_loader(
 
     this->use_mmap = use_mmap;
     this->check_tensors = check_tensors;
+    ggml_backend_reg_t rpc_reg = ggml_backend_reg_by_name("RPC");
+    if (rpc_reg) {
+        ggml_backend_rpc_buffer_load_tensor_fn = (ggml_backend_rpc_buffer_load_tensor_t) ggml_backend_reg_get_proc_address(rpc_reg, "ggml_backend_rpc_buffer_load_tensor");
+    }
 }
 
 std::string llama_model_loader::get_arch_name() const {
@@ -881,6 +886,24 @@ void llama_model_loader::load_data_for(struct ggml_tensor * cur) const {
     }
 }
 
+bool llama_model_loader::rpc_load_tensor(struct ggml_tensor * cur) {
+    if (!ggml_backend_rpc_buffer_load_tensor_fn) {
+        return false;
+    }
+    char hash_key[128];
+    snprintf(hash_key, sizeof(hash_key), "%s_hash", ggml_get_name(cur));
+    uint64_t hash_val = 0;
+    if (!get_key(hash_key, hash_val, false)) {
+        return false;
+    }
+    ggml_backend_buffer_t buf = cur->view_src ? cur->view_src->buffer : cur->buffer;
+    const char * buf_name = ggml_backend_buffer_name(buf);
+    if (strncmp(buf_name, "RPC", 3) != 0) {
+        return false;
+    }
+    return ggml_backend_rpc_buffer_load_tensor_fn(buf, cur, 0, hash_val);
+}
+
 bool llama_model_loader::load_all_data(
         struct ggml_context * ctx,
         llama_buf_map & bufs,
@@ -1022,7 +1045,9 @@ bool llama_model_loader::load_all_data(
                 mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
             } else {
-                ggml_backend_tensor_set(cur, data, 0, n_size);
+                if (!rpc_load_tensor(cur)) {
+                    ggml_backend_tensor_set(cur, data, 0, n_size);
+                }
             }
         } else {
             const auto & file = files.at(weight->idx);

@@ -55,6 +55,7 @@ typedef enum {
 
 struct hash_params {
     std::string input;
+    bool fnv = false;
     bool xxh64 = false;
     bool sha1 = false;
     bool sha256 = false;
@@ -103,6 +104,7 @@ static void hash_print_usage(const char * executable) {
     printf("\n");
     printf("options:\n");
     printf("  -h, --help              show this help message and exit\n");
+    printf("      --fnv               use FNV-1a hash\n");
     printf("      --xxh64             use xxh64 hash\n");
     printf("      --sha1              use sha1 hash\n");
     printf("      --sha256            use sha256 hash\n");
@@ -129,6 +131,11 @@ static void hash_params_parse_ex(int argc, const char ** argv, hash_params & par
         if (arg == "-h" || arg == "--help") {
             hash_print_usage(argv[0]);
             exit(0);
+        }
+
+        if (arg == "--fnv") {
+            arg_found = true;
+            params.fnv = true;
         }
 
         if (arg == "--xxh64") {
@@ -283,6 +290,18 @@ static void generate_uuidv5(const unsigned char sha1_digest[20], unsigned char u
     uuid[ 8] |= (0x8 << 4);
 }
 
+// Computes FNV-1a hash of the data
+static uint64_t fnv_hash(const uint8_t * data, size_t len) {
+    const uint64_t fnv_prime = 0x100000001b3ULL;
+    uint64_t hash = 0xcbf29ce484222325ULL;
+
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= data[i];
+        hash *= fnv_prime;
+    }
+    return hash;
+}
+
 static hash_exit_code_t gguf_hash(const hash_params & hash_params) {
     const std::string & fname = hash_params.input;
     struct ggml_context * ctx_data = NULL;
@@ -326,7 +345,11 @@ static hash_exit_code_t gguf_hash(const hash_params & hash_params) {
         SHA1Update( &sha1_for_uuid_ctx, (unsigned char const *)uuidv5_namespace, sizeof(uuidv5_namespace));
     }
 
+    struct gguf_context * ctx_out = gguf_init_empty();
     struct gguf_context * ctx = gguf_init_from_file(fname.c_str(), params);
+
+    gguf_set_kv(ctx_out, ctx);
+
     const int n_tensors = gguf_get_n_tensors(ctx);
     bool tensor_layer_in_manifest = false;
     bool model_in_manifest = false;
@@ -335,9 +358,18 @@ static hash_exit_code_t gguf_hash(const hash_params & hash_params) {
     for (int i = 0; i < n_tensors; ++i) {
         const char * name = gguf_get_tensor_name(ctx, i);
         struct ggml_tensor * cur = ggml_get_tensor(ctx_data, name);
+        gguf_add_tensor(ctx_out, cur);
         auto n_bytes = ggml_nbytes(cur);
         auto *raw_data = cur->data;
         const std::string tensor_layer_name = fname + ":" + name;
+
+        if (hash_params.fnv) {
+            uint64_t hash = fnv_hash((const uint8_t *)raw_data, n_bytes);
+            printf("%016lx  %s\n", hash, tensor_layer_name.c_str());
+            char hash_key[128];
+            snprintf(hash_key, sizeof(hash_key), "%s_hash", name);
+            gguf_set_val_u64(ctx_out, hash_key, hash);
+        }
 
         if (hash_params.xxh64) {
 
@@ -580,6 +612,9 @@ static hash_exit_code_t gguf_hash(const hash_params & hash_params) {
         }
     }
 
+    auto fname_out = fname + ".rpc";
+    gguf_write_to_file(ctx_out, fname_out.c_str(), false);
+    gguf_free(ctx_out);
 
     ggml_free(ctx_data);
     gguf_free(ctx);
@@ -663,7 +698,7 @@ int main(int argc, const char ** argv) {
 
         // Autoselect the highest security hash if manifest is provided but
         // the user has not specifically defined the hash they care about
-        if (!params.xxh64 && !params.sha1 && !params.uuid && !params.sha256) {
+        if (!params.fnv && !params.xxh64 && !params.sha1 && !params.uuid && !params.sha256) {
             // User has not selected a specific value, pick most secure hash
             if (manifest_check.sha256) {
                 params.sha256 = true;
@@ -680,7 +715,7 @@ int main(int argc, const char ** argv) {
     }
 
     // By default if no swich argument provided, assume xxh64
-    if (!params.xxh64 && !params.sha1 && !params.uuid && !params.sha256) {
+    if (!params.fnv && !params.xxh64 && !params.sha1 && !params.uuid && !params.sha256) {
         params.xxh64 = true;
     }
 

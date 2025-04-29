@@ -1079,12 +1079,14 @@ bool llama_model_loader::load_all_data(
                         buffer_idx %= n_buffers;
                     }
                 } else {
-                    read_buf.resize(n_size);
-                    file->seek(weight->offs, SEEK_SET);
-                    file->read_raw(read_buf.data(), n_size);
-                    ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
-                    if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
-                        throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
+                    if (!check_tensors && !rpc_load_tensor(cur)) {
+                        read_buf.resize(n_size);
+                        file->seek(weight->offs, SEEK_SET);
+                        file->read_raw(read_buf.data(), n_size);
+                        ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
+                        if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
+                            throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
+                        }
                     }
                 }
             }

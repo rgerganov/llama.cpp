@@ -365,7 +365,14 @@ static hash_exit_code_t gguf_hash(const hash_params & hash_params) {
 
         if (hash_params.fnv) {
             uint64_t hash = fnv_hash((const uint8_t *)raw_data, n_bytes);
-            printf("%016lx  %s\n", hash, tensor_layer_name.c_str());
+            char hex_result[17];
+            for (int  offset = 0; offset < 8; offset++) {
+                unsigned int shift_bits_by = (8 * (8 - offset - 1));
+                snprintf( ( hex_result + (2*offset)), sizeof(hex_result) - (2*offset), "%02x", (unsigned char) (hash >> shift_bits_by)&0xff);
+            }
+
+            printf("%-8s  %-s  %s\n", "fnv", hex_result, tensor_layer_name.c_str());
+
             char hash_key[128];
             snprintf(hash_key, sizeof(hash_key), "%s_hash", name);
             gguf_set_val_u64(ctx_out, hash_key, hash);

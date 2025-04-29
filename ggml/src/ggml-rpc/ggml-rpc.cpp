@@ -1143,7 +1143,7 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
          || request.tensor.data + request.offset >= p1
          || size > (p1 - request.tensor.data - request.offset)) {
             GGML_LOG_ERROR("[%s] tensor data region (data=0x%" PRIx64 ", offset=%" PRIu64 ", size=%zu, hash=0x%" PRIx64 ") out of buffer bounds [0x%zx, 0x%zx)\n",
-                           __func__, in_tensor->data, offset, size, *hash, p0, p1);
+                           __func__, request.tensor.data, request.offset, size, request.hash, p0, p1);
             return false;
         }
     }

@@ -555,7 +555,7 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
     rpc_tensor rpc_tensor = serialize_tensor(tensor);
     if (size > HASH_THRESHOLD) {
         rpc_msg_set_tensor_hash_req request;
-        request.tensor = serialize_tensor(tensor);
+        request.tensor = rpc_tensor;
         request.offset = offset;
         request.hash = fnv_hash((const uint8_t*)data, size);
         rpc_msg_set_tensor_hash_rsp response;

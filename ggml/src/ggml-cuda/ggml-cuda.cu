@@ -60,7 +60,9 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
-#include <cufile.h>
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(_WIN32)
+#   include <cufile.h>
+#endif
 #ifdef _WIN32
 #else
     #include <fcntl.h>
@@ -3417,15 +3419,7 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
 }
 
 static bool ggml_backend_cuda_buffer_load_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const char * path, size_t file_offset, size_t tensor_offset, size_t size) {
-#ifdef _WIN32
-    GGML_UNUSED(buffer);
-    GGML_UNUSED(tensor);
-    GGML_UNUSED(path);
-    GGML_UNUSED(file_offset);
-    GGML_UNUSED(tensor_offset);
-    GGML_UNUSED(size);
-    return false;
-#else
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(_WIN32)
     static bool initialized = false;
     static bool use_cufile = false;
     if (!initialized) {
@@ -3475,6 +3469,14 @@ static bool ggml_backend_cuda_buffer_load_tensor(ggml_backend_buffer_t buffer, g
     cuFileHandleDeregister(cf_handle);
     close(fd);
     return true;
+#else
+    GGML_UNUSED(buffer);
+    GGML_UNUSED(tensor);
+    GGML_UNUSED(path);
+    GGML_UNUSED(file_offset);
+    GGML_UNUSED(tensor_offset);
+    GGML_UNUSED(size);
+    return false;
 #endif
 }
 

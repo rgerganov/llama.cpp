@@ -61,13 +61,13 @@
 #include <string>
 #include <vector>
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(_WIN32)
-#   include <cufile.h>
-#endif
-#ifdef _WIN32
-#else
+#   define GGML_USE_CUFILE
+#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(_WIN32)
+#ifdef GGML_USE_CUFILE
+    #include <cufile.h>
     #include <fcntl.h>
     #include <unistd.h>
-#endif
+#endif // GGML_USE_CUFILE
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -3419,7 +3419,7 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
 }
 
 static bool ggml_backend_cuda_buffer_load_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const char * path, size_t file_offset, size_t tensor_offset, size_t size) {
-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(_WIN32)
+#ifdef GGML_USE_CUFILE
     static bool initialized = false;
     static bool use_cufile = false;
     if (!initialized) {
@@ -3477,7 +3477,7 @@ static bool ggml_backend_cuda_buffer_load_tensor(ggml_backend_buffer_t buffer, g
     GGML_UNUSED(tensor_offset);
     GGML_UNUSED(size);
     return false;
-#endif
+#endif // GGML_USE_CUFILE
 }
 
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {

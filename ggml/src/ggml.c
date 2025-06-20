@@ -3408,7 +3408,7 @@ struct ggml_tensor * ggml_set_rows(
     GGML_ASSERT(c->ne[3] == 1);
     GGML_ASSERT(a->type == GGML_TYPE_F16);
     GGML_ASSERT(b->type == GGML_TYPE_F32);
-    GGML_ASSERT(c->type == GGML_TYPE_I32);
+    GGML_ASSERT(c->type == GGML_TYPE_I64);
 
     struct ggml_tensor * result = ggml_view_tensor(ctx, a);
 

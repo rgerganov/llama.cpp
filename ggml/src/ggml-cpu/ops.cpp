@@ -4558,13 +4558,13 @@ static void ggml_compute_forward_set_rows_f32(
                 const int64_t i11 = i02%ne11;
                 const int64_t i10 = i;
 
-                const int64_t i01 = *(int64_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
+                const int64_t i1 = *(int64_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
 
-                GGML_ASSERT(i01 >= 0 && i01 < ne1);
+                GGML_ASSERT(i1 >= 0 && i1 < ne1);
 
                 from_float(
-                        (const float *) ((char *) src0->data +   i*nb01 + i02*nb02 + i03*nb03),
-                                        ((char *)  dst->data + i01*nb1  + i02*nb2  + i03*nb3), nc);
+                        (const float *) ((char *) src0->data +  i*nb01 + i02*nb02 + i03*nb03),
+                                        ((char *)  dst->data + i1*nb1  + i02*nb2  + i03*nb3), nc);
             }
         }
     }

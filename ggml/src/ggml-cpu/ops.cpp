@@ -4549,6 +4549,8 @@ static void ggml_compute_forward_set_rows_f32(
     const int ir0 = dr*ith;
     const int ir1 = MIN(ir0 + dr, nr);
 
+    ggml_from_float_t const from_float = ggml_get_type_traits_cpu(dst->type)->from_float;
+
     for (int64_t i03 = 0; i03 < ne03; ++i03) {
         for (int64_t i02 = 0; i02 < ne02; ++i02) {
             for (int64_t i = ir0; i < ir1; ++i) {
@@ -4560,9 +4562,9 @@ static void ggml_compute_forward_set_rows_f32(
 
                 GGML_ASSERT(i01 >= 0 && i01 < ne1);
 
-                ggml_cpu_fp32_to_fp16(
+                from_float(
                         (const float *) ((char *) src0->data +   i*nb01 + i02*nb02 + i03*nb03),
-                        (ggml_fp16_t *) ((char *)  dst->data + i01*nb1  + i02*nb2  + i03*nb3), nc);
+                                        ((char *)  dst->data + i01*nb1  + i02*nb2  + i03*nb3), nc);
             }
         }
     }

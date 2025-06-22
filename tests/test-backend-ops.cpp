@@ -1213,6 +1213,78 @@ struct test_get_rows_back : public test_case {
     }
 };
 
+// GGML_OP_SET_ROWS
+struct test_set_rows : public test_case {
+    const ggml_type type;
+    const int n; // cols
+    const int m; // rows
+    const int r; // rows to set
+    const int b0; // batch size
+    const int b1; // batch size
+    const int bs; // batch size src (for testing broadcast)
+    const bool v; // view (non-contiguous src1)
+
+    std::string vars() override {
+        return VARS_TO_STR7(type, n, m, r, b0, bs, v);
+    }
+
+    test_set_rows(ggml_type type = GGML_TYPE_F32, int n = 10, int m = 5, int r = 3, int b = 1, int bs = 1, bool v = false)
+        : type(type), n(n), m(m), r(r), b0(b), b1(3), bs(bs), v(v) {
+            GGML_ASSERT(b0 % bs == 0 && "b0 must be a multiple of bs");
+            GGML_ASSERT(r <= m && "r must be less than or equal to m");
+        }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * dst = ggml_new_tensor_4d(ctx, type, n, m, b0, b1);
+        ggml_set_name(dst, "dst");
+
+        ggml_tensor * src = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n, r, b0, b1);
+        ggml_set_name(src, "src");
+
+        ggml_tensor * row_idxs = ggml_new_tensor_3d(ctx, GGML_TYPE_I64, r, bs, b1);
+        ggml_set_name(row_idxs, "row_idxs");
+
+        if (v) {
+            src      = ggml_view_4d(ctx, src, n, r/2, b0, b1, src->nb[1], src->nb[2], src->nb[3], 0);
+            row_idxs = ggml_view_3d(ctx, row_idxs, r/2, bs, b1, row_idxs->nb[1], row_idxs->nb[2], 0);
+            ggml_set_name(row_idxs, "view_of_rows");
+        }
+
+        ggml_tensor * out = ggml_set_rows(ctx, dst, src, row_idxs);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::random_device rd;
+        std::default_random_engine rng(rd());
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_I64) {
+                if (ggml_is_view_op(t->op)) {
+                    continue;
+                }
+
+                for (int i2 = 0; i2 < t->ne[2]; i2++) {
+                    for (int i1 = 0; i1 < t->ne[1]; i1++) {
+                        std::vector<int64_t> data(m);
+                        for (int i = 0; i < m; i++) {
+                            data[i] = i;
+                        }
+                        std::shuffle(data.begin(), data.end(), rng);
+                        data.resize(t->ne[0]);
+
+                        const size_t offs = i1*t->nb[1] + i2*t->nb[2];
+                        ggml_backend_tensor_set(t, data.data(), offs, t->ne[0]*sizeof(int64_t));
+                    }
+                }
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
 // GGML_OP_ARGMAX
 struct test_argmax : public test_case {
     const ggml_type type;
@@ -3982,6 +4054,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     for (bool v : {false, true}) {
         test_cases.emplace_back(new test_get_rows_back(GGML_TYPE_I32, 256, 5, 4, 1, v));
+    }
+
+    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, 1, 8, 2, 1, 1, false));
+    for (ggml_type type : all_types) {
+        for (int b : {1, 7}) {
+            for (bool v : {false, true}) {
+                test_cases.emplace_back(new test_set_rows(type, 256, 5, 4, b, 1, v));
+            }
+        }
     }
 
     for (ggml_type type_input : {GGML_TYPE_F32}) {

@@ -1383,6 +1383,8 @@ extern "C" {
     // b TS  [n_embd, n_rows, ne02,   ne03] | ne02 == ne2, ne03 == ne3
     // c I64 [n_rows, ne11,   ne12,   1]    | c[i] in [0, ne1)
     //
+    // undefined behavior if destination rows overlap
+    //
     // broadcast:
     //   ne2 % ne11 == 0
     //   ne3 % ne12 == 0

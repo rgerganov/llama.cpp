@@ -696,24 +696,8 @@ static void ggml_compute_forward_dup_f32(
     if (ggml_is_contiguous(dst)) {
         // TODO: simplify
         if (nb00 == sizeof(float)) {
-            if (dst->type == GGML_TYPE_F32) {
-                size_t id = 0;
-                const size_t rs = ne00 * nb00;
-                char * dst_ptr = (char *) dst->data;
-
-                for (int i03 = 0; i03 < ne03; i03++) {
-                    for (int i02 = 0; i02 < ne02; i02++) {
-                        id += rs * ir0;
-                        for (int i01 = ir0; i01 < ir1; i01++) {
-                            const char * src0_ptr = (char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
-                            memcpy(dst_ptr + id, src0_ptr, rs);
-                            id += rs;
-                        }
-                        id += rs * (ne01 - ir1);
-                    }
-                }
-            } else if (ggml_get_type_traits_cpu(dst->type)->from_float) {
-                ggml_from_float_t const quantize_row_q = ggml_get_type_traits_cpu(dst->type)->from_float;
+            if (ggml_get_type_traits_cpu(dst->type)->from_float) {
+                ggml_from_float_t const from_float = ggml_get_type_traits_cpu(dst->type)->from_float;
 
                 size_t id = 0;
                 size_t rs = nb0 * (ne00 / ggml_blck_size(dst->type));
@@ -724,7 +708,7 @@ static void ggml_compute_forward_dup_f32(
                         id += rs * ir0;
                         for (int i01 = ir0; i01 < ir1; i01++) {
                             const float * src0_ptr = (float *) ((char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
-                            quantize_row_q(src0_ptr, dst_ptr + id, ne00);
+                            from_float(src0_ptr, dst_ptr + id, ne00);
                             id += rs;
                         }
                         id += rs * (ne01 - ir1);

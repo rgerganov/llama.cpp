@@ -1267,6 +1267,7 @@ struct test_set_rows : public test_case {
 
                 for (int i2 = 0; i2 < t->ne[2]; i2++) {
                     for (int i1 = 0; i1 < t->ne[1]; i1++) {
+                        // generate a shuffled subset of row indices
                         std::vector<int64_t> data(m);
                         for (int i = 0; i < m; i++) {
                             data[i] = i;

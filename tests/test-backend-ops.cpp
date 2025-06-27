@@ -1216,37 +1216,34 @@ struct test_get_rows_back : public test_case {
 // GGML_OP_SET_ROWS
 struct test_set_rows : public test_case {
     const ggml_type type;
-    const int n; // cols
-    const int m; // rows
+    const std::array<int64_t, 4> ne;
+    const std::array<int, 2> nr23; // broadcast only dims 2 and 3
     const int r; // rows to set
-    const int b0; // batch size
-    const int b1; // batch size
-    const int bs; // batch size src (for testing broadcast)
     const bool v; // view (non-contiguous src1)
 
     std::string vars() override {
-        return VARS_TO_STR7(type, n, m, r, b0, bs, v);
+        return VARS_TO_STR5(type, ne, nr23, r, v);
     }
 
-    test_set_rows(ggml_type type = GGML_TYPE_F32, int n = 10, int m = 5, int r = 3, int b = 1, int bs = 1, bool v = false)
-        : type(type), n(n), m(m), r(r), b0(b), b1(3), bs(bs), v(v) {
-            GGML_ASSERT(b0 % bs == 0 && "b0 must be a multiple of bs");
-            GGML_ASSERT(r <= m && "r must be less than or equal to m");
-        }
+    test_set_rows(ggml_type type,
+            std::array<int64_t, 4> ne,
+            std::array<int, 2> nr23,
+            int r, bool v = false)
+        : type(type), ne(ne), nr23(nr23), r(r), v(v) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * dst = ggml_new_tensor_4d(ctx, type, n, m, b0, b1);
+        ggml_tensor * dst = ggml_new_tensor_4d(ctx, type,          ne[0], ne[1], ne[2]*nr23[0], ne[3]*nr23[1]);
         ggml_set_name(dst, "dst");
 
-        ggml_tensor * src = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n, r, b0, b1);
+        ggml_tensor * src = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, ne[0], r,     ne[2]*nr23[0], ne[3]*nr23[1]);
         ggml_set_name(src, "src");
 
-        ggml_tensor * row_idxs = ggml_new_tensor_3d(ctx, GGML_TYPE_I64, r, bs, b1);
+        ggml_tensor * row_idxs = ggml_new_tensor_3d(ctx, GGML_TYPE_I64, r, ne[2], ne[3]);
         ggml_set_name(row_idxs, "row_idxs");
 
         if (v) {
-            src      = ggml_view_4d(ctx, src, n, r/2, b0, b1, src->nb[1], src->nb[2], src->nb[3], 0);
-            row_idxs = ggml_view_3d(ctx, row_idxs, r/2, bs, b1, row_idxs->nb[1], row_idxs->nb[2], 0);
+            src      = ggml_view_4d(ctx, src, ne[0], r/2, ne[2]*nr23[0], ne[3]*nr23[1], src->nb[1], src->nb[2], src->nb[3], 0);
+            row_idxs = ggml_view_3d(ctx, row_idxs, r/2, ne[2], ne[3], row_idxs->nb[1], row_idxs->nb[2], 0);
             ggml_set_name(row_idxs, "view_of_rows");
         }
 
@@ -1268,8 +1265,8 @@ struct test_set_rows : public test_case {
                 for (int i2 = 0; i2 < t->ne[2]; i2++) {
                     for (int i1 = 0; i1 < t->ne[1]; i1++) {
                         // generate a shuffled subset of row indices
-                        std::vector<int64_t> data(m);
-                        for (int i = 0; i < m; i++) {
+                        std::vector<int64_t> data(ne[1]);
+                        for (int i = 0; i < ne[1]; i++) {
                             data[i] = i;
                         }
                         std::shuffle(data.begin(), data.end(), rng);
@@ -4057,11 +4054,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_get_rows_back(GGML_TYPE_I32, 256, 5, 4, 1, v));
     }
 
-    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, 1, 8, 2, 1, 1, false));
+    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
     for (ggml_type type : all_types) {
         for (int b : {1, 7}) {
             for (bool v : {false, true}) {
-                test_cases.emplace_back(new test_set_rows(type, 256, 5, 4, b, 1, v));
+                test_cases.emplace_back(new test_set_rows(type, { 256, 5,  b, 3 }, { 1, 1, }, 1, v));
+                test_cases.emplace_back(new test_set_rows(type, { 256, 11, 1, b }, { 2, 3, }, 7, v));
+
+                test_cases.emplace_back(new test_set_rows(type, { 3*ggml_blck_size(type), 3, b, 1 }, { 2, 3, }, 2, v));
+
+                if (ggml_blck_size(type) == 1) {
+                    test_cases.emplace_back(new test_set_rows(type, { 31, 3, b, 1 }, { 2, 3, }, 2, v));
+                    test_cases.emplace_back(new test_set_rows(type, { 33, 5, 1, b }, { 2, 3, }, 1, v));
+                }
             }
         }
     }

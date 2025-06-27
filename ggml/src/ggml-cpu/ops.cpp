@@ -4523,7 +4523,7 @@ void ggml_compute_forward_set_rows(
             } break;
         default:
             {
-                GGML_ABORT("fatal error");
+                GGML_ABORT("src0->type = %d (%s) not supported", src0->type, ggml_type_name(src0->type));
             }
     }
 }

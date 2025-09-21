@@ -907,7 +907,7 @@ private:
 };
 
 #define LOG_DBG(msg, ...) \
-    do { if (verbose) GGML_LOG_DEBUG(msg, ##__VA_ARGS__); } while (0)
+    do { if (verbose) GGML_LOG_DEBUG(msg, __VA_ARGS__); } while (0)
 
 void rpc_server::hello(rpc_msg_hello_rsp & response) {
     response.major = RPC_PROTO_MAJOR_VERSION;

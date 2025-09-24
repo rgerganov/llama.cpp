@@ -31,6 +31,12 @@
 #include <filesystem>
 #include <algorithm>
 
+static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
+
+#define LOG_DBG(...) \
+    do { if (RPC_DEBUG) GGML_LOG_DEBUG(__VA_ARGS__); } while (0)
+
+
 namespace fs = std::filesystem;
 
 static constexpr size_t MAX_CHUNK_SIZE = 1024ull * 1024ull * 1024ull; // 1 GiB
@@ -47,7 +53,7 @@ struct socket_t {
     sockfd_t fd;
     socket_t(sockfd_t fd) : fd(fd) {}
     ~socket_t() {
-        GGML_LOG_DEBUG("[%s] closing socket %d\n", __func__, this->fd);
+        LOG_DBG("[%s] closing socket %d\n", __func__, this->fd);
 #ifdef _WIN32
         closesocket(this->fd);
 #else
@@ -349,7 +355,7 @@ static bool recv_data(sockfd_t sockfd, void * data, size_t size) {
             return false;
         }
         if (n == 0) {
-            GGML_LOG_DEBUG("recv returned 0 (peer closed?)\n");
+            LOG_DBG("recv returned 0 (peer closed?)\n");
             return false;
         }
         bytes_recv += (size_t)n;
@@ -488,7 +494,7 @@ static std::shared_ptr<socket_t> get_socket(const std::string & endpoint) {
     if (!check_server_version(sock)) {
         return nullptr;
     }
-    GGML_LOG_DEBUG("[%s] connected to %s, sockfd=%d\n", __func__, endpoint.c_str(), sock->fd);
+    LOG_DBG("[%s] connected to %s, sockfd=%d\n", __func__, endpoint.c_str(), sock->fd);
     sockets[endpoint] = sock;
     return sock;
 }
@@ -871,8 +877,8 @@ void ggml_backend_rpc_get_device_memory(const char * endpoint, size_t * free, si
 
 class rpc_server {
 public:
-    rpc_server(ggml_backend_t backend, const char * cache_dir, bool verbose)
-        : backend(backend), cache_dir(cache_dir), verbose(verbose) {
+    rpc_server(ggml_backend_t backend, const char * cache_dir)
+        : backend(backend), cache_dir(cache_dir) {
     }
     ~rpc_server();
 
@@ -902,12 +908,8 @@ private:
 
     ggml_backend_t backend;
     const char * cache_dir;
-    bool verbose;
     std::unordered_set<ggml_backend_buffer_t> buffers;
 };
-
-#define LOG_DBG(msg, ...) \
-    do { if (verbose) GGML_LOG_DEBUG(msg, __VA_ARGS__); } while (0)
 
 void rpc_server::hello(rpc_msg_hello_rsp & response) {
     response.major = RPC_PROTO_MAJOR_VERSION;
@@ -1389,9 +1391,9 @@ rpc_server::~rpc_server() {
     }
 }
 
-static void rpc_serve_client(ggml_backend_t backend, const char * cache_dir, bool verbose,
+static void rpc_serve_client(ggml_backend_t backend, const char * cache_dir,
                              sockfd_t sockfd, size_t free_mem, size_t total_mem) {
-    rpc_server server(backend, cache_dir, verbose);
+    rpc_server server(backend, cache_dir);
     uint8_t cmd;
     if (!recv_data(sockfd, &cmd, 1)) {
         return;
@@ -1611,7 +1613,7 @@ static void rpc_serve_client(ggml_backend_t backend, const char * cache_dir, boo
 }
 
 void ggml_backend_rpc_start_server(ggml_backend_t backend, const char * endpoint,
-                                   const char * cache_dir, bool verbose,
+                                   const char * cache_dir,
                                    size_t free_mem, size_t total_mem) {
     printf("Starting RPC server v%d.%d.%d\n",
         RPC_PROTO_MAJOR_VERSION,
@@ -1649,7 +1651,7 @@ void ggml_backend_rpc_start_server(ggml_backend_t backend, const char * endpoint
         }
         printf("Accepted client connection, free_mem=%zu, total_mem=%zu\n", free_mem, total_mem);
         fflush(stdout);
-        rpc_serve_client(backend, cache_dir, verbose, client_socket->fd, free_mem, total_mem);
+        rpc_serve_client(backend, cache_dir, client_socket->fd, free_mem, total_mem);
         printf("Client connection closed\n");
         fflush(stdout);
     }

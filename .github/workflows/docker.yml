@@ -87,9 +87,9 @@ jobs:
               TYPE="-${{ matrix.config.tag }}"
           fi
           PREFIX="ghcr.io/${REPO_OWNER}/${REPO_NAME}:"
-          FULLTAGS="${PREFIX}full${TYPE},${PREFIX}full${TYPE}${{ steps.srctag.outputs.name }}"
-          LIGHTTAGS="${PREFIX}light${TYPE},${PREFIX}light${TYPE}${{ steps.srctag.outputs.name }}"
-          SERVERTAGS="${PREFIX}server${TYPE},${PREFIX}server${TYPE}${{ steps.srctag.outputs.name }}"
+          FULLTAGS="${PREFIX}full${TYPE},${PREFIX}full${TYPE}-${{ steps.srctag.outputs.name }}"
+          LIGHTTAGS="${PREFIX}light${TYPE},${PREFIX}light${TYPE}-${{ steps.srctag.outputs.name }}"
+          SERVERTAGS="${PREFIX}server${TYPE},${PREFIX}server${TYPE}-${{ steps.srctag.outputs.name }}"
           echo "full_output_tags=$FULLTAGS" >> $GITHUB_OUTPUT
           echo "light_output_tags=$LIGHTTAGS" >> $GITHUB_OUTPUT
           echo "server_output_tags=$SERVERTAGS" >> $GITHUB_OUTPUT

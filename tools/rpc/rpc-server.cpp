@@ -260,7 +260,6 @@ static std::vector<ggml_backend_t> create_backends(const rpc_server_params & par
                 auto backend = ggml_backend_dev_init(dev, nullptr);
                 if (backend) {
                     backends.push_back(backend);
-                    fprintf(stderr, "%s: using %s backend\n", __func__, ggml_backend_name(backend));
                 }
             }
         }

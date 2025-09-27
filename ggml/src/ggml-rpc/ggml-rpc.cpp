@@ -835,9 +835,10 @@ static ggml_backend_i ggml_backend_rpc_interface = {
 ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, uint32_t device) {
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
+    std::string dev_name = "RPC" + std::to_string(device) + "[" + std::string(endpoint) + "]";
     // NOTE: buffer types are allocated and never freed; this is by design
     static std::unordered_map<std::string, ggml_backend_buffer_type_t> buft_map;
-    auto it = buft_map.find(endpoint);
+    auto it = buft_map.find(dev_name);
     if (it != buft_map.end()) {
         return it->second;
     }
@@ -848,7 +849,6 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
     }
     size_t alignment = get_alignment(sock, device);
     size_t max_size = get_max_size(sock, device);
-    std::string dev_name = "RPC" + std::to_string(device) + "[" + std::string(endpoint) + "]";
     ggml_backend_rpc_buffer_type_context * buft_ctx = new ggml_backend_rpc_buffer_type_context {
         /* .endpoint  = */ endpoint,
         /* .device    = */ device,
@@ -862,7 +862,7 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
         /* .device  = */ ggml_backend_rpc_add_device(endpoint, device),
         /* .context = */ buft_ctx
     };
-    buft_map[endpoint] = buft;
+    buft_map[dev_name] = buft;
     return buft;
 }
 
@@ -1686,6 +1686,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
                 rpc_msg_get_device_memory_rsp response;
                 response.free_mem = free_mem[dev_id];
                 response.total_mem = total_mem[dev_id];
+                LOG_DBG("[get_device_mem] device: %u, free_mem: %zu, total_mem: %zu\n", dev_id,
+                    response.free_mem, response.total_mem);
                 if (!send_msg(sockfd, &response, sizeof(response))) {
                     return;
                 }
@@ -1834,7 +1836,7 @@ static bool ggml_backend_rpc_device_supports_buft(ggml_backend_dev_t dev, ggml_b
     }
     ggml_backend_rpc_buffer_type_context * buft_ctx = (ggml_backend_rpc_buffer_type_context *)buft->context;
     ggml_backend_rpc_device_context * dev_ctx = (ggml_backend_rpc_device_context *)dev->context;
-    return buft_ctx->endpoint == dev_ctx->endpoint;
+    return buft_ctx->endpoint == dev_ctx->endpoint && buft_ctx->device == dev_ctx->device;
 }
 
 static const struct ggml_backend_device_i ggml_backend_rpc_device_i = {

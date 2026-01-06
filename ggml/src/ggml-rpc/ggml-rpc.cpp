@@ -472,6 +472,26 @@ static bool send_rpc_cmd(const std::shared_ptr<socket_t> & sock, enum rpc_cmd cm
     return true;
 }
 
+static bool send_rpc_cmd2(const std::shared_ptr<socket_t> & sock, enum rpc_cmd cmd,
+                         const void * input1, size_t input1_size,
+                         const void * input2, size_t input2_size) {
+    uint8_t cmd_byte = cmd;
+    if (!send_data(sock->fd, &cmd_byte, sizeof(cmd_byte))) {
+        return false;
+    }
+    size_t input_size = input1_size + input2_size;
+    if (!send_data(sock->fd, &input_size, sizeof(input_size))) {
+        return false;
+    }
+    if (!send_data(sock->fd, input1, input1_size)) {
+        return false;
+    }
+    if (!send_data(sock->fd, input2, input2_size)) {
+        return false;
+    }
+    return true;
+}
+
 // RPC request : | rpc_cmd (1 byte) | request_size (8 bytes) | request_data (request_size bytes) |
 // RPC response: | response_size (8 bytes) | response_data (response_size bytes) |
 static bool send_rpc_cmd(const std::shared_ptr<socket_t> & sock, enum rpc_cmd cmd, const void * input, size_t input_size, void * output, size_t output_size) {
@@ -650,12 +670,13 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
         }
     }
     // input serialization format: | rpc_tensor | offset (8 bytes) | data (size bytes)
-    size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + size;
-    std::vector<uint8_t> input(input_size, 0);
-    memcpy(input.data(), &rpc_tensor, sizeof(rpc_tensor));
-    memcpy(input.data() + sizeof(rpc_tensor), &offset, sizeof(offset));
-    memcpy(input.data() + sizeof(rpc_tensor) + sizeof(offset), data, size);
-    bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR, input.data(), input.size());
+    size_t input1_size = sizeof(rpc_tensor) + sizeof(uint64_t); 
+    //size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + size;
+    std::vector<uint8_t> input1(input1_size, 0);
+    memcpy(input1.data(), &rpc_tensor, sizeof(rpc_tensor));
+    memcpy(input1.data() + sizeof(rpc_tensor), &offset, sizeof(offset));
+    //memcpy(input.data() + sizeof(rpc_tensor) + sizeof(offset), data, size);
+    bool status = send_rpc_cmd2(ctx->sock, RPC_CMD_SET_TENSOR, input1.data(), input1.size(), data, size);
     RPC_STATUS_ASSERT(status);
 }
 

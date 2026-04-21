@@ -79,6 +79,11 @@ static_assert(RPC_CMD_HELLO == 14, "RPC_CMD_HELLO must be always 14");
 // Try RPC_CMD_SET_TENSOR_HASH first when data size is larger than this threshold
 const size_t HASH_THRESHOLD = 10 * 1024 * 1024;
 
+struct rpc_msg_header {
+    uint8_t  cmd;
+    uint64_t size;
+};
+
 struct rpc_msg_hello_req {
     uint8_t conn_caps[RPC_CONN_CAPS_SIZE];
 };
@@ -265,22 +270,7 @@ static bool send_msg(socket_ptr sock, const void * msg, size_t msg_size) {
     return sock->send_data(msg, msg_size);
 }
 
-static bool recv_msg(socket_ptr sock, void * msg, size_t msg_size) {
-    uint64_t size;
-    if (!sock->recv_data(&size, sizeof(size))) {
-        return false;
-    }
-    if (size != msg_size) {
-        return false;
-    }
-    return sock->recv_data(msg, msg_size);
-}
-
-static bool recv_msg(socket_ptr sock, std::vector<uint8_t> & input) {
-    uint64_t size;
-    if (!sock->recv_data(&size, sizeof(size))) {
-        return false;
-    }
+static bool recv_msg(socket_ptr sock, std::vector<uint8_t> & input, uint64_t size) {
     try {
         input.resize(size);
     } catch (const std::bad_alloc & e) {
@@ -307,11 +297,10 @@ static bool parse_endpoint(const std::string & endpoint, std::string & host, int
 // RPC request : | rpc_cmd (1 byte) | request_size (8 bytes) | request_data (request_size bytes) |
 // No response
 static bool send_rpc_cmd(socket_ptr sock, enum rpc_cmd cmd, const void * input, size_t input_size) {
-    uint8_t cmd_byte = cmd;
-    if (!sock->send_data(&cmd_byte, sizeof(cmd_byte))) {
-        return false;
-    }
-    if (!sock->send_data(&input_size, sizeof(input_size))) {
+    rpc_msg_header header;
+    header.cmd = cmd;
+    header.size = input_size;
+    if (!sock->send_data(&header, sizeof(header))) {
         return false;
     }
     if (!sock->send_data(input, input_size)) {
@@ -1444,24 +1433,17 @@ rpc_server::~rpc_server() {
 static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const char * cache_dir,
                              socket_ptr sock) {
     rpc_server server(backends, cache_dir);
-    uint8_t cmd;
-    if (!sock->recv_data(&cmd, 1)) {
+    rpc_msg_header header;
+    if (!sock->recv_data(&header, sizeof(header))) {
         return;
     }
-    if (cmd != RPC_CMD_HELLO) {
+    if (header.cmd != RPC_CMD_HELLO) {
         GGML_LOG_ERROR("Expected HELLO command, update client\n");
         return;
     }
-
-    // Read input_size and validate protocol version
-    uint64_t hello_input_size;
-    if (!sock->recv_data(&hello_input_size, sizeof(hello_input_size))) {
-        return;
-    }
-
-    if (hello_input_size != sizeof(rpc_msg_hello_req)) {
+    if (header.size != sizeof(rpc_msg_hello_req)) {
         GGML_LOG_ERROR("HELLO request size mismatch (%zu vs %zu) — client needs upgrade to protocol v%d.x\n",
-                       (size_t)hello_input_size, sizeof(rpc_msg_hello_req), RPC_PROTO_MAJOR_VERSION);
+                       (size_t)header.size, sizeof(rpc_msg_hello_req), RPC_PROTO_MAJOR_VERSION);
         return;
     }
 
@@ -1481,23 +1463,21 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
     // Activate transport upgrade using client's caps
     sock->update_caps(req.conn_caps);
     while (true) {
-        if (!sock->recv_data(&cmd, 1)) {
+        if (!sock->recv_data(&header, sizeof(header))) {
             break;
         }
-        if (cmd >= RPC_CMD_COUNT) {
+        if (header.cmd >= RPC_CMD_COUNT) {
             // fail fast if the command is invalid
-            GGML_LOG_ERROR("Unknown command: %d\n", cmd);
+            GGML_LOG_ERROR("Unknown command: %d\n", header.cmd);
             break;
         }
-        switch (cmd) {
+        switch (header.cmd) {
             case RPC_CMD_HELLO: {
                 // HELLO command is handled above
                 return;
             }
             case RPC_CMD_DEVICE_COUNT: {
-                if (!recv_msg(sock, nullptr, 0)) {
-                    return;
-                }
+                GGML_ASSERT(header.size == 0);
                 rpc_msg_device_count_rsp response;
                 response.device_count = backends.size();
                 if (!send_msg(sock, &response, sizeof(response))) {
@@ -1507,7 +1487,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_ALLOC_BUFFER: {
                 rpc_msg_alloc_buffer_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_alloc_buffer_rsp response;
@@ -1521,7 +1502,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GET_ALLOC_SIZE: {
                 rpc_msg_get_alloc_size_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_get_alloc_size_rsp response;
@@ -1535,7 +1517,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GET_ALIGNMENT: {
                 rpc_msg_get_alignment_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_get_alignment_rsp response;
@@ -1549,7 +1532,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GET_MAX_SIZE: {
                 rpc_msg_get_max_size_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_get_max_size_rsp response;
@@ -1563,7 +1547,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_BUFFER_GET_BASE: {
                 rpc_msg_buffer_get_base_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_buffer_get_base_rsp response;
@@ -1577,7 +1562,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_FREE_BUFFER: {
                 rpc_msg_free_buffer_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 if (!server.free_buffer(request)) {
@@ -1590,7 +1576,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_BUFFER_CLEAR: {
                 rpc_msg_buffer_clear_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 if (!server.buffer_clear(request)) {
@@ -1603,7 +1590,7 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_SET_TENSOR: {
                 std::vector<uint8_t> input;
-                if (!recv_msg(sock, input)) {
+                if (!recv_msg(sock, input, header.size)) {
                     return;
                 }
                 if (!server.set_tensor(input)) {
@@ -1613,7 +1600,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_SET_TENSOR_HASH: {
                 rpc_msg_set_tensor_hash_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_set_tensor_hash_rsp response;
@@ -1627,7 +1615,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_INIT_TENSOR: {
                 rpc_msg_init_tensor_req request;
-                if (!recv_msg(sock, &request,sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 if (!server.init_tensor(request)) {
@@ -1640,7 +1629,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GET_TENSOR: {
                 rpc_msg_get_tensor_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 std::vector<uint8_t> response;
@@ -1654,7 +1644,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_COPY_TENSOR: {
                 rpc_msg_copy_tensor_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_copy_tensor_rsp response;
@@ -1668,7 +1659,7 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GRAPH_COMPUTE: {
                 std::vector<uint8_t> input;
-                if (!recv_msg(sock, input)) {
+                if (!recv_msg(sock, input, header.size)) {
                     return;
                 }
                 if (!server.graph_compute(input)) {
@@ -1678,7 +1669,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GRAPH_RECOMPUTE: {
                 rpc_msg_graph_recompute_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 if (!server.graph_recompute(request)) {
@@ -1688,7 +1680,8 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             }
             case RPC_CMD_GET_DEVICE_MEMORY: {
                 rpc_msg_get_device_memory_req request;
-                if (!recv_msg(sock, &request, sizeof(request))) {
+                GGML_ASSERT(header.size == sizeof(request));
+                if (!sock->recv_data(&request, sizeof(request))) {
                     return;
                 }
                 rpc_msg_get_device_memory_rsp response;
@@ -1701,7 +1694,7 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
                 break;
             }
             default: {
-                GGML_LOG_ERROR("Unknown command: %d\n", cmd);
+                GGML_LOG_ERROR("Unknown command: %d\n", header.cmd);
                 return;
             }
         }

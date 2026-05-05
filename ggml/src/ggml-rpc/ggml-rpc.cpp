@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <atomic>
 #include <thread>
+#include <chrono>
+#include <ctime>
 
 static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
 
@@ -33,6 +35,26 @@ namespace fs = std::filesystem;
 
 // macro for nicer error messages on server crash
 #define RPC_STATUS_ASSERT(x) if (!(x)) GGML_ABORT("Remote RPC server crashed or returned malformed response")
+
+// wall-clock timestamp formatted as HH:MM:SS.microseconds (local time);
+// used to instrument graph_compute / graph_recompute across multiple RPC servers
+static std::string rpc_wall_time_str() {
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const auto us  = duration_cast<microseconds>(now.time_since_epoch()).count();
+    const std::time_t secs = static_cast<std::time_t>(us / 1000000);
+    const long        frac = static_cast<long>(us % 1000000);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &secs);
+#else
+    localtime_r(&secs, &tm);
+#endif
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%06ld",
+             tm.tm_hour, tm.tm_min, tm.tm_sec, frac);
+    return buf;
+}
 
 // all RPC structures must be packed
 #pragma pack(push, 1)
@@ -984,12 +1006,18 @@ static void ggml_backend_rpc_event_wait(ggml_backend_t backend, ggml_backend_eve
     GGML_UNUSED(event);
 }
 
+static bool ggml_backend_rpc_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst) {
+    return true;
+}
+
 static ggml_backend_i ggml_backend_rpc_interface = {
     /* .get_name                = */ ggml_backend_rpc_name,
     /* .free                    = */ ggml_backend_rpc_free,
     /* .set_tensor_async        = */ ggml_backend_rpc_set_tensor_async,
     /* .get_tensor_async        = */ ggml_backend_rpc_get_tensor_async,
-    /* .cpy_tensor_async        = */ NULL,
+    /* .set_tensor_2d_async     = */ NULL,
+    /* .get_tensor_2d_async     = */ NULL,
+    /* .cpy_tensor_async        = */ ggml_backend_rpc_cpy_tensor_async,
     /* .synchronize             = */ ggml_backend_rpc_synchronize,
     /* .graph_plan_create       = */ NULL,
     /* .graph_plan_free         = */ NULL,
@@ -1634,7 +1662,11 @@ bool rpc_server::graph_compute(const std::vector<uint8_t> & input) {
             return false;
         }
     }
+    GGML_LOG_INFO("[%s] device: %u, n_nodes: %u start: %s\n",
+                  __func__, device, n_nodes, rpc_wall_time_str().c_str());
     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
+    GGML_LOG_INFO("[%s] device: %u, n_nodes: %u end:   %s\n",
+                  __func__, device, n_nodes, rpc_wall_time_str().c_str());
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     stored_graphs[device].graph = graph;
     return true;
@@ -1650,7 +1682,11 @@ bool rpc_server::graph_recompute(const rpc_msg_graph_recompute_req & request) {
     }
     ggml_cgraph * graph = stored_graphs[device].graph;
     LOG_DBG("[%s] device: %u\n", __func__, device);
+    GGML_LOG_INFO("[%s] device: %u start: %s\n",
+                  __func__, device, rpc_wall_time_str().c_str());
     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
+    GGML_LOG_INFO("[%s] device: %u end:   %s\n",
+                  __func__, device, rpc_wall_time_str().c_str());
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     return true;
 }

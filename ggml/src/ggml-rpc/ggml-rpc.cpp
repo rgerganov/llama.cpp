@@ -98,6 +98,14 @@ enum rpc_cmd {
     RPC_CMD_HELLO,
     RPC_CMD_DEVICE_COUNT,
     RPC_CMD_GRAPH_RECOMPUTE,
+    // Direct server-to-server tensor transfer:
+    //  PUSH_TENSOR (client -> source server): ask source to forward a tensor
+    //                to a peer destination server, returns ack on completion.
+    //  RECV_TENSOR (source server -> destination server): same payload as
+    //                SET_TENSOR plus an ack response so the source knows the
+    //                write is durable.
+    RPC_CMD_PUSH_TENSOR,
+    RPC_CMD_RECV_TENSOR,
     RPC_CMD_NONE,
     RPC_CMD_COUNT,
 };
@@ -216,6 +224,23 @@ struct rpc_msg_get_device_memory_rsp {
 
 struct rpc_msg_graph_recompute_req {
     uint32_t device;
+};
+
+// Wire format for RPC_CMD_PUSH_TENSOR: this fixed header is followed by
+// `endpoint_len` bytes of the destination endpoint string ("host:port").
+struct rpc_msg_push_tensor_req_hdr {
+    rpc_tensor src;
+    rpc_tensor dst;
+    uint64_t   size;
+    uint32_t   endpoint_len;
+};
+
+struct rpc_msg_push_tensor_rsp {
+    uint8_t result;
+};
+
+struct rpc_msg_recv_tensor_rsp {
+    uint8_t result;
 };
 
 #pragma pack(pop)
@@ -446,6 +471,20 @@ public:
     void event_free(ggml_backend_event_t event);
     void event_synchronize(ggml_backend_event_t event);
     void event_record(ggml_backend_event_t event);
+    // queue a barrier on this dispatcher that blocks until `event` fires; used
+    // when this backend must wait for an event recorded on another backend.
+    void event_wait(ggml_backend_event_t event);
+    // queue a barrier on this dispatcher that blocks until `sf` fires.
+    void wait_for(std::shared_future<void> sf);
+    // enqueue an async response-bearing send, return a future that fires when
+    // the response has been received from the server. `keep_alive` (if set)
+    // is held by the message until processing completes -- useful when the
+    // caller heap-allocates the response slot and needs it to outlive its
+    // own stack frame.
+    std::shared_future<void> send_async_future(enum rpc_cmd cmd,
+                                               std::shared_ptr<const void> input, size_t input_size,
+                                               void * output, size_t output_size,
+                                               std::shared_ptr<void> keep_alive = nullptr);
     void synchronize();
 
     void start(const std::string & endpoint);
@@ -461,6 +500,13 @@ private:
         void                        * output;
         size_t                        output_size;
         std::promise<void>            completion;
+        // optional barrier: worker waits on this future before sending the cmd.
+        // used by ggml_backend_rpc_event_wait to gate this dispatcher's queue
+        // on an event recorded by another dispatcher.
+        std::shared_future<void>      wait_on;
+        // keep arbitrary auxiliary state (e.g. heap-allocated response slot)
+        // alive until the worker has finished processing this message.
+        std::shared_ptr<void>         keep_alive;
     };
     using rpc_msg_ptr   = std::shared_ptr<rpc_msg>;
     using rpc_msg_queue = message_queue<rpc_msg_ptr>;
@@ -553,6 +599,34 @@ void rpc_dispatcher::event_record(ggml_backend_event_t event) {
     GGML_ASSERT(queue.push(ev->msg));
 }
 
+void rpc_dispatcher::event_wait(ggml_backend_event_t event) {
+    rpc_event * ev = (rpc_event *)event->context;
+    wait_for(ev->sf);
+}
+
+void rpc_dispatcher::wait_for(std::shared_future<void> sf) {
+    auto msg = std::make_shared<rpc_msg>();
+    msg->cmd = RPC_CMD_NONE;
+    msg->wait_on = std::move(sf);
+    GGML_ASSERT(queue.push(msg));
+}
+
+std::shared_future<void> rpc_dispatcher::send_async_future(enum rpc_cmd cmd,
+                                                           std::shared_ptr<const void> input, size_t input_size,
+                                                           void * output, size_t output_size,
+                                                           std::shared_ptr<void> keep_alive) {
+    auto msg = std::make_shared<rpc_msg>();
+    msg->cmd = cmd;
+    msg->input = std::move(input);
+    msg->input_size = input_size;
+    msg->output = output;
+    msg->output_size = output_size;
+    msg->keep_alive = std::move(keep_alive);
+    auto sf = msg->completion.get_future().share();
+    GGML_ASSERT(queue.push(msg));
+    return sf;
+}
+
 void rpc_dispatcher::synchronize() {
     // to ensure all messages are processed, submit dummy message and wait for it to complete
     auto msg = std::make_shared<rpc_msg>();
@@ -561,22 +635,35 @@ void rpc_dispatcher::synchronize() {
     msg->completion.get_future().wait();
 }
 
-void rpc_dispatcher::start(const std::string & endpoint) {
+// Open a fresh TCP connection to the given endpoint and complete the HELLO
+// handshake. Returns nullptr on failure (parse error, connect, hello).
+static socket_ptr connect_and_hello(const std::string & endpoint) {
     std::string host;
     int port;
     if (!parse_endpoint(endpoint, host, port)) {
-        GGML_ABORT("Failed to parse endpoint: %s\n", endpoint.c_str());
+        GGML_LOG_ERROR("Failed to parse endpoint: %s\n", endpoint.c_str());
+        return nullptr;
     }
     if (!rpc_transport_init()) {
-        GGML_ABORT("RPC transport initialization failed\n");
+        GGML_LOG_ERROR("RPC transport initialization failed\n");
+        return nullptr;
     }
-
-    sock = socket_t::connect(host.c_str(), port);
+    auto sock = socket_t::connect(host.c_str(), port);
     if (sock == nullptr) {
-        GGML_ABORT("Failed to connect to %s\n", endpoint.c_str());
+        GGML_LOG_ERROR("Failed to connect to %s\n", endpoint.c_str());
+        return nullptr;
     }
     if (!negotiate_hello(sock)) {
-        GGML_ABORT("RPC handshake failed for %s\n", endpoint.c_str());
+        GGML_LOG_ERROR("RPC handshake failed for %s\n", endpoint.c_str());
+        return nullptr;
+    }
+    return sock;
+}
+
+void rpc_dispatcher::start(const std::string & endpoint) {
+    sock = connect_and_hello(endpoint);
+    if (sock == nullptr) {
+        GGML_ABORT("Failed to open RPC connection to %s\n", endpoint.c_str());
     }
     LOG_DBG("[%s] connected to %s\n", __func__, endpoint.c_str());
     running = true;
@@ -588,6 +675,10 @@ void rpc_dispatcher::work() {
         rpc_msg_ptr msg_ptr;
         if (!queue.pop(&msg_ptr)) {
             break;
+        }
+        if (msg_ptr->wait_on.valid()) {
+            // block this dispatcher until the dependency event fires
+            msg_ptr->wait_on.wait();
         }
         if (msg_ptr->cmd != RPC_CMD_NONE) {
             if (msg_ptr->output) {
@@ -609,6 +700,40 @@ rpc_dispatcher::~rpc_dispatcher() {
     if (thread.joinable()) {
         thread.join();
     }
+}
+
+// One open connection from this server to another rpc-server, used for direct
+// activation push (RPC_CMD_PUSH_TENSOR -> RPC_CMD_RECV_TENSOR). Multiple
+// connection-handler threads on this server may share the socket, so a mutex
+// serializes the request/response pair on the wire.
+struct peer_socket {
+    std::mutex mu;
+    socket_ptr sock;
+};
+
+static std::mutex                                                  g_peer_pool_mu;
+static std::unordered_map<std::string, std::shared_ptr<peer_socket>> g_peer_pool;
+
+static std::shared_ptr<peer_socket> get_peer_socket(const std::string & endpoint) {
+    std::lock_guard<std::mutex> lock(g_peer_pool_mu);
+    auto it = g_peer_pool.find(endpoint);
+    if (it != g_peer_pool.end() && it->second && it->second->sock != nullptr) {
+        return it->second;
+    }
+    auto sock = connect_and_hello(endpoint);
+    if (sock == nullptr) {
+        return nullptr;
+    }
+    auto ps = std::make_shared<peer_socket>();
+    ps->sock = sock;
+    g_peer_pool[endpoint] = ps;
+    return ps;
+}
+
+// Evict a (presumably broken) peer socket so the next push reconnects.
+static void drop_peer_socket(const std::string & endpoint) {
+    std::lock_guard<std::mutex> lock(g_peer_pool_mu);
+    g_peer_pool.erase(endpoint);
 }
 
 static std::shared_ptr<rpc_dispatcher> get_dispatcher(const std::string & endpoint) {
@@ -896,19 +1021,11 @@ static void ggml_backend_rpc_free(ggml_backend_t backend) {
 static void ggml_backend_rpc_set_tensor_async(ggml_backend_t backend, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_rpc_context * ctx = (ggml_backend_rpc_context *)backend->context;
     rpc_tensor rpc_tensor = serialize_tensor(tensor);
-    if (size > HASH_THRESHOLD) {
-        auto request = std::make_shared<rpc_msg_set_tensor_hash_req>();
-        request->tensor = rpc_tensor;
-        request->offset = offset;
-        request->hash = fnv_hash((const uint8_t*)data, size);
-        rpc_msg_set_tensor_hash_rsp response;
-        // TODO: make this async
-        ctx->dispatcher->send(RPC_CMD_SET_TENSOR_HASH, request, sizeof(*request), &response, sizeof(response));
-        if (response.result) {
-            // the server has the same data, no need to send it
-            return;
-        }
-    }
+    // The hash precheck (RPC_CMD_SET_TENSOR_HASH) is intentionally skipped on
+    // the async path. Async set_tensor is on the per-iteration hot path
+    // (activations, KV cache) where the data changes every step, so the hash
+    // round-trip is pure latency overhead with no cache hit. The sync,
+    // buffer-level set_tensor used at model-load time still does dedup.
     // input serialization format: | rpc_tensor | offset (8 bytes) | data (size bytes)
     size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + size;
     uint8_t * input = new uint8_t[input_size]();
@@ -1001,12 +1118,64 @@ static void ggml_backend_rpc_event_record(ggml_backend_t backend, ggml_backend_e
 }
 
 static void ggml_backend_rpc_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
-    // this is noop for RPC as we have a single stream
-    GGML_UNUSED(backend);
-    GGML_UNUSED(event);
+    ggml_backend_rpc_context * rpc_ctx = (ggml_backend_rpc_context *)backend->context;
+    rpc_ctx->dispatcher->event_wait(event);
 }
 
-static bool ggml_backend_rpc_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst) {
+// Allow disabling the direct peer-push path (e.g. firewalled deployments where
+// servers cannot connect to each other) via env var. When disabled, returning
+// false makes the scheduler fall back to its get/set-tensor copy path.
+static bool rpc_peer_push_enabled() {
+    static const bool enabled = (std::getenv("GGML_RPC_NO_PEER") == nullptr);
+    return enabled;
+}
+
+static bool ggml_backend_rpc_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst,
+                                              const ggml_tensor * src, ggml_tensor * dst) {
+    if (!rpc_peer_push_enabled()) {
+        return false;
+    }
+    if (!src->buffer || !dst->buffer) {
+        return false;
+    }
+    auto * src_buft_ctx = (ggml_backend_rpc_buffer_type_context *) src->buffer->buft->context;
+    auto * dst_buft_ctx = (ggml_backend_rpc_buffer_type_context *) dst->buffer->buft->context;
+    if (src_buft_ctx == nullptr || dst_buft_ctx == nullptr) {
+        return false;
+    }
+    if (src_buft_ctx->endpoint == dst_buft_ctx->endpoint) {
+        // Same endpoint: cheaper local COPY_TENSOR via the buffer iface, let
+        // the framework use that path.
+        return false;
+    }
+
+    auto * src_ctx = (ggml_backend_rpc_context *) backend_src->context;
+    auto * dst_ctx = (ggml_backend_rpc_context *) backend_dst->context;
+
+    const size_t size = ggml_nbytes(src);
+
+    // Build PUSH_TENSOR payload: fixed header + dst endpoint string.
+    const std::string & dst_endpoint = dst_buft_ctx->endpoint;
+    const size_t payload_size = sizeof(rpc_msg_push_tensor_req_hdr) + dst_endpoint.size();
+    auto payload = std::shared_ptr<uint8_t>(new uint8_t[payload_size], std::default_delete<uint8_t[]>());
+    rpc_msg_push_tensor_req_hdr hdr = {};
+    hdr.src          = serialize_tensor(src);
+    hdr.dst          = serialize_tensor(dst);
+    hdr.size         = size;
+    hdr.endpoint_len = (uint32_t) dst_endpoint.size();
+    memcpy(payload.get(), &hdr, sizeof(hdr));
+    memcpy(payload.get() + sizeof(hdr), dst_endpoint.data(), dst_endpoint.size());
+
+    // Async send on the source dispatcher. The response slot is heap-allocated
+    // and kept alive by the dispatcher message until the worker writes into it.
+    auto rsp = std::make_shared<rpc_msg_push_tensor_rsp>();
+    auto sf  = src_ctx->dispatcher->send_async_future(
+        RPC_CMD_PUSH_TENSOR, payload, payload_size, rsp.get(), sizeof(*rsp), rsp);
+
+    // Gate the destination dispatcher until the push has been ack'd by the
+    // peer (so any subsequent set_tensor / graph_compute on dst is correctly
+    // ordered after the data has landed).
+    dst_ctx->dispatcher->wait_for(sf);
     return true;
 }
 
@@ -1094,10 +1263,19 @@ void ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device, 
 
 // RPC server-side implementation
 
+// State shared across all client/peer connections of one rpc-server process.
+// buffers and backend operations are serialized by ops_mutex, so multiple
+// connection-handling threads can safely interleave (regular client +
+// peer-from-another-server pushes).
+struct rpc_server_state {
+    std::mutex                                ops_mutex;
+    std::unordered_set<ggml_backend_buffer_t> buffers;
+};
+
 class rpc_server {
 public:
-    rpc_server(std::vector<ggml_backend_t> all_backends, const char * cache_dir)
-        : backends(std::move(all_backends)), cache_dir(cache_dir) {
+    rpc_server(std::vector<ggml_backend_t> all_backends, const char * cache_dir, rpc_server_state & state)
+        : backends(std::move(all_backends)), cache_dir(cache_dir), state(state) {
         stored_graphs.resize(backends.size());
     }
     ~rpc_server();
@@ -1118,6 +1296,13 @@ public:
     bool init_tensor(const rpc_msg_init_tensor_req & request);
     bool get_alloc_size(const rpc_msg_get_alloc_size_req & request, rpc_msg_get_alloc_size_rsp & response);
     bool get_device_memory(const rpc_msg_get_device_memory_req & request, rpc_msg_get_device_memory_rsp & response);
+    // Read `size` bytes of `request.src` from local memory and forward them to
+    // the peer server identified by the trailing endpoint string, addressed at
+    // `request.dst`. Sets response.result on success.
+    bool push_tensor(const std::vector<uint8_t> & input, rpc_msg_push_tensor_rsp & response);
+    // Same wire format as set_tensor but acks back to the source so it can
+    // signal completion to the orchestrating client.
+    bool recv_tensor(const std::vector<uint8_t> & input, rpc_msg_recv_tensor_rsp & response);
 
     struct stored_graph {
         std::vector<uint8_t>   buffer;
@@ -1135,7 +1320,10 @@ private:
 
     std::vector<ggml_backend_t> backends;
     const char * cache_dir;
-    std::unordered_set<ggml_backend_buffer_t> buffers;
+    rpc_server_state & state;
+    // buffers allocated by this connection; freed when the connection ends.
+    // Peer-only connections never alloc, so this stays empty for them.
+    std::unordered_set<ggml_backend_buffer_t> owned_buffers;
     // store the last computed graph for each backend
     std::vector<stored_graph> stored_graphs;
 };
@@ -1163,6 +1351,7 @@ bool rpc_server::get_alloc_size(const rpc_msg_get_alloc_size_req & request, rpc_
     GGML_ASSERT(ctx_ptr != nullptr);
     ggml_context * ctx = ctx_ptr.get();
 
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_tensor * tensor = deserialize_tensor(ctx, &request.tensor);
     if (tensor == nullptr) {
         GGML_LOG_ERROR("Null tensor pointer passed to server get_alloc_size function.\n");
@@ -1192,6 +1381,7 @@ bool rpc_server::alloc_buffer(const rpc_msg_alloc_buffer_req & request, rpc_msg_
     if (dev_id >= backends.size()) {
         return false;
     }
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backends[dev_id]);
     ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, request.size);
     response.remote_ptr = 0;
@@ -1201,7 +1391,8 @@ bool rpc_server::alloc_buffer(const rpc_msg_alloc_buffer_req & request, rpc_msg_
         response.remote_size = buffer->size;
         LOG_DBG("[%s] device: %d, size: %" PRIu64 " -> remote_ptr: %" PRIx64 ", remote_size: %" PRIu64 "\n",
             __func__, dev_id, request.size, response.remote_ptr, response.remote_size);
-        buffers.insert(buffer);
+        state.buffers.insert(buffer);
+        owned_buffers.insert(buffer);
     } else {
         LOG_DBG("[%s] device: %d, size: %" PRIu64 " -> failed\n", __func__, dev_id, request.size);
     }
@@ -1235,7 +1426,8 @@ bool rpc_server::get_max_size(const rpc_msg_get_max_size_req & request, rpc_msg_
 bool rpc_server::buffer_get_base(const rpc_msg_buffer_get_base_req & request, rpc_msg_buffer_get_base_rsp & response) {
     LOG_DBG("[%s] remote_ptr: %" PRIx64 "\n", __func__, request.remote_ptr);
     ggml_backend_buffer_t buffer = reinterpret_cast<ggml_backend_buffer_t>(request.remote_ptr);
-    if (buffers.find(buffer) == buffers.end()) {
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
+    if (state.buffers.find(buffer) == state.buffers.end()) {
         GGML_LOG_ERROR("[%s] buffer not found\n", __func__);
         return false;
     }
@@ -1247,19 +1439,22 @@ bool rpc_server::buffer_get_base(const rpc_msg_buffer_get_base_req & request, rp
 bool rpc_server::free_buffer(const rpc_msg_free_buffer_req & request) {
     LOG_DBG("[%s] remote_ptr: %" PRIx64 "\n", __func__, request.remote_ptr);
     ggml_backend_buffer_t buffer = reinterpret_cast<ggml_backend_buffer_t>(request.remote_ptr);
-    if (buffers.find(buffer) == buffers.end()) {
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
+    if (state.buffers.find(buffer) == state.buffers.end()) {
         GGML_LOG_ERROR("[%s] buffer not found\n", __func__);
         return false;
     }
     ggml_backend_buffer_free(buffer);
-    buffers.erase(buffer);
+    state.buffers.erase(buffer);
+    owned_buffers.erase(buffer);
     return true;
 }
 
 bool rpc_server::buffer_clear(const rpc_msg_buffer_clear_req & request) {
     LOG_DBG("[%s] remote_ptr: %" PRIx64 ", value: %u\n", __func__, request.remote_ptr, request.value);
     ggml_backend_buffer_t buffer = reinterpret_cast<ggml_backend_buffer_t>(request.remote_ptr);
-    if (buffers.find(buffer) == buffers.end()) {
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
+    if (state.buffers.find(buffer) == state.buffers.end()) {
         GGML_LOG_ERROR("[%s] buffer not found\n", __func__);
         return false;
     }
@@ -1293,7 +1488,8 @@ ggml_tensor * rpc_server::deserialize_tensor(struct ggml_context * ctx, const rp
         result->nb[i] = tensor->nb[i];
     }
     result->buffer = reinterpret_cast<ggml_backend_buffer_t>(tensor->buffer);
-    if (result->buffer && buffers.find(result->buffer) == buffers.end()) {
+    // state.ops_mutex must be held by the caller
+    if (result->buffer && state.buffers.find(result->buffer) == state.buffers.end()) {
         result->buffer = nullptr;
     }
 
@@ -1335,6 +1531,7 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
     ggml_context_ptr ctx_ptr { ggml_init(params) };
     GGML_ASSERT(ctx_ptr != nullptr);
     ggml_context * ctx = ctx_ptr.get();
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_tensor * tensor = deserialize_tensor(ctx, in_tensor);
     if (tensor == nullptr || tensor->buffer == nullptr) {
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
@@ -1405,6 +1602,7 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
     ggml_context_ptr ctx_ptr { ggml_init(params) };
     GGML_ASSERT(ctx_ptr != nullptr);
     ggml_context * ctx = ctx_ptr.get();
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_tensor * tensor = deserialize_tensor(ctx, &request.tensor);
     if (tensor == nullptr || tensor->buffer == nullptr) {
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
@@ -1440,6 +1638,7 @@ bool rpc_server::init_tensor(const rpc_msg_init_tensor_req & request) {
     ggml_context_ptr ctx_ptr { ggml_init(params) };
     GGML_ASSERT(ctx_ptr != nullptr);
     ggml_context * ctx = ctx_ptr.get();
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_tensor * tensor = deserialize_tensor(ctx, &request.tensor);
     if (tensor == nullptr) {
         GGML_LOG_ERROR("Null tensor pointer passed to server init_tensor function.\n");
@@ -1475,6 +1674,7 @@ bool rpc_server::get_tensor(const rpc_msg_get_tensor_req & request, std::vector<
     ggml_context_ptr ctx_ptr { ggml_init(params) };
     GGML_ASSERT(ctx_ptr != nullptr);
     ggml_context * ctx = ctx_ptr.get();
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_tensor * tensor = deserialize_tensor(ctx, &request.tensor);
     if (tensor == nullptr || tensor->buffer == nullptr) {
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
@@ -1511,6 +1711,7 @@ bool rpc_server::copy_tensor(const rpc_msg_copy_tensor_req & request, rpc_msg_co
     GGML_ASSERT(ctx_ptr != nullptr);
     ggml_context * ctx = ctx_ptr.get();
 
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     ggml_tensor * src = deserialize_tensor(ctx, &request.src);
     ggml_tensor * dst = deserialize_tensor(ctx, &request.dst);
     if (src == nullptr || dst == nullptr || src->buffer == nullptr || dst->buffer == nullptr) {
@@ -1628,6 +1829,7 @@ bool rpc_server::graph_compute(const std::vector<uint8_t> & input) {
     const rpc_tensor * tensors = (const rpc_tensor *)src;
     LOG_DBG("[%s] device: %u, n_nodes: %u, n_tensors: %u\n", __func__, device, n_nodes, n_tensors);
 
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     size_t buf_size = ggml_tensor_overhead()*(n_nodes + n_tensors) + ggml_graph_overhead_custom(n_nodes, false);
     if (stored_graphs[device].buffer.size() < buf_size) {
         stored_graphs[device].buffer.resize(buf_size);
@@ -1682,6 +1884,7 @@ bool rpc_server::graph_recompute(const rpc_msg_graph_recompute_req & request) {
     }
     ggml_cgraph * graph = stored_graphs[device].graph;
     LOG_DBG("[%s] device: %u\n", __func__, device);
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
     GGML_LOG_INFO("[%s] device: %u start: %s\n",
                   __func__, device, rpc_wall_time_str().c_str());
     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
@@ -1689,6 +1892,84 @@ bool rpc_server::graph_recompute(const rpc_msg_graph_recompute_req & request) {
                   __func__, device, rpc_wall_time_str().c_str());
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     return true;
+}
+
+bool rpc_server::push_tensor(const std::vector<uint8_t> & input, rpc_msg_push_tensor_rsp & response) {
+    response.result = 0;
+    if (input.size() < sizeof(rpc_msg_push_tensor_req_hdr)) {
+        return false;
+    }
+    rpc_msg_push_tensor_req_hdr hdr;
+    memcpy(&hdr, input.data(), sizeof(hdr));
+    if (input.size() != sizeof(hdr) + hdr.endpoint_len) {
+        GGML_LOG_ERROR("[%s] malformed request size %zu vs hdr+%u\n",
+                       __func__, input.size(), hdr.endpoint_len);
+        return false;
+    }
+    std::string endpoint((const char *)input.data() + sizeof(hdr), hdr.endpoint_len);
+    LOG_DBG("[%s] forwarding %" PRIu64 " bytes to %s\n", __func__, hdr.size, endpoint.c_str());
+
+    // Read source bytes from the local backend (D2H if needed).
+    std::vector<uint8_t> data;
+    {
+        struct ggml_init_params params {
+            /*.mem_size   =*/ ggml_tensor_overhead(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context_ptr ctx_ptr { ggml_init(params) };
+        GGML_ASSERT(ctx_ptr != nullptr);
+        ggml_context * ctx = ctx_ptr.get();
+        std::lock_guard<std::mutex> lock(state.ops_mutex);
+        ggml_tensor * src = deserialize_tensor(ctx, &hdr.src);
+        if (src == nullptr || src->buffer == nullptr) {
+            GGML_LOG_ERROR("[%s] error deserializing src tensor\n", __func__);
+            return false;
+        }
+        // Bound check: data + size must fit inside src's buffer
+        const size_t p0 = (size_t) ggml_backend_buffer_get_base(src->buffer);
+        const size_t p1 = p0 + ggml_backend_buffer_get_size(src->buffer);
+        if (hdr.src.data < p0 || hdr.src.data + hdr.size > p1) {
+            GGML_LOG_ERROR("[%s] src out of buffer bounds\n", __func__);
+            return false;
+        }
+        data.resize(hdr.size);
+        ggml_backend_tensor_get(src, data.data(), 0, hdr.size);
+    }
+
+    // Build RECV_TENSOR payload: | dst rpc_tensor | offset=0 | data |
+    const size_t payload_size = sizeof(rpc_tensor) + sizeof(uint64_t) + hdr.size;
+    std::vector<uint8_t> payload(payload_size);
+    memcpy(payload.data(), &hdr.dst, sizeof(rpc_tensor));
+    const uint64_t zero_off = 0;
+    memcpy(payload.data() + sizeof(rpc_tensor), &zero_off, sizeof(uint64_t));
+    memcpy(payload.data() + sizeof(rpc_tensor) + sizeof(uint64_t), data.data(), hdr.size);
+
+    auto ps = get_peer_socket(endpoint);
+    if (ps == nullptr) {
+        GGML_LOG_ERROR("[%s] cannot connect to peer %s\n", __func__, endpoint.c_str());
+        return false;
+    }
+    rpc_msg_recv_tensor_rsp peer_rsp = {};
+    bool ok;
+    {
+        std::lock_guard<std::mutex> lock(ps->mu);
+        ok = send_rpc_cmd(ps->sock, RPC_CMD_RECV_TENSOR, payload.data(), payload.size(),
+                          &peer_rsp, sizeof(peer_rsp));
+    }
+    if (!ok) {
+        GGML_LOG_ERROR("[%s] peer send failed for %s, evicting connection\n",
+                       __func__, endpoint.c_str());
+        drop_peer_socket(endpoint);
+        return false;
+    }
+    response.result = peer_rsp.result;
+    return true;
+}
+
+bool rpc_server::recv_tensor(const std::vector<uint8_t> & input, rpc_msg_recv_tensor_rsp & response) {
+    response.result = set_tensor(input) ? 1 : 0;
+    return response.result == 1;
 }
 
 bool rpc_server::get_device_memory(const rpc_msg_get_device_memory_req & request, rpc_msg_get_device_memory_rsp & response) {
@@ -1706,14 +1987,16 @@ bool rpc_server::get_device_memory(const rpc_msg_get_device_memory_req & request
 }
 
 rpc_server::~rpc_server() {
-    for (auto buffer : buffers) {
+    std::lock_guard<std::mutex> lock(state.ops_mutex);
+    for (auto buffer : owned_buffers) {
         ggml_backend_buffer_free(buffer);
+        state.buffers.erase(buffer);
     }
 }
 
 static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const char * cache_dir,
-                             socket_ptr sock) {
-    rpc_server server(backends, cache_dir);
+                             socket_ptr sock, rpc_server_state & state) {
+    rpc_server server(backends, cache_dir, state);
     uint8_t cmd;
     if (!sock->recv_data(&cmd, 1)) {
         return;
@@ -1947,6 +2230,31 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
                 }
                 break;
             }
+            case RPC_CMD_PUSH_TENSOR: {
+                std::vector<uint8_t> input;
+                if (!recv_msg(sock, input)) {
+                    return;
+                }
+                rpc_msg_push_tensor_rsp response = {};
+                // even on push failure we ack with result=0 so the client can react
+                server.push_tensor(input, response);
+                if (!send_msg(sock, &response, sizeof(response))) {
+                    return;
+                }
+                break;
+            }
+            case RPC_CMD_RECV_TENSOR: {
+                std::vector<uint8_t> input;
+                if (!recv_msg(sock, input)) {
+                    return;
+                }
+                rpc_msg_recv_tensor_rsp response = {};
+                server.recv_tensor(input, response);
+                if (!send_msg(sock, &response, sizeof(response))) {
+                    return;
+                }
+                break;
+            }
             case RPC_CMD_GET_DEVICE_MEMORY: {
                 rpc_msg_get_device_memory_req request;
                 if (!recv_msg(sock, &request, sizeof(request))) {
@@ -2024,6 +2332,11 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
         fprintf(stderr, "Failed to create server socket\n");
         return;
     }
+    // Shared across all client and peer connections of this server process so
+    // that buffers allocated by one connection can be referenced by another
+    // (e.g. RECV_TENSOR from a peer-server writing to a buffer the original
+    // client allocated). All backend operations are serialized by ops_mutex.
+    static rpc_server_state shared_state;
     while (true) {
         auto client_socket = server_socket->accept();
         if (client_socket == nullptr) {
@@ -2032,9 +2345,11 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
         }
         printf("Accepted client connection\n");
         fflush(stdout);
-        rpc_serve_client(backends, cache_dir, client_socket);
-        printf("Client connection closed\n");
-        fflush(stdout);
+        std::thread([backends, cache_dir, client_socket]() {
+            rpc_serve_client(backends, cache_dir, client_socket, shared_state);
+            printf("Client connection closed\n");
+            fflush(stdout);
+        }).detach();
     }
     rpc_transport_shutdown();
     for (auto backend : backends) {

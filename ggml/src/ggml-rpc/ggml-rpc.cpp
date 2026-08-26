@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
@@ -84,7 +85,20 @@ enum rpc_cmd {
 static_assert(RPC_CMD_HELLO == 14, "RPC_CMD_HELLO must be always 14");
 
 // Try RPC_CMD_SET_TENSOR_HASH first when data size is larger than this threshold
-const size_t HASH_THRESHOLD = 10 * 1024 * 1024;
+// can be overridden with the GGML_RPC_HASH_THRESHOLD environment variable (value in bytes)
+static size_t get_hash_threshold() {
+    static const size_t threshold = [] {
+        if (const char * env = std::getenv("GGML_RPC_HASH_THRESHOLD")) {
+            char * end;
+            unsigned long long val = std::strtoull(env, &end, 10);
+            if (end != env && val > 0) {
+                return (size_t) val;
+            }
+        }
+        return (size_t) (10 * 1024 * 1024);
+    }();
+    return threshold;
+}
 
 struct rpc_msg_hello_req {
     uint8_t conn_caps[RPC_CONN_CAPS_SIZE];
@@ -691,7 +705,7 @@ static void ggml_backend_rpc_buffer_memset_tensor(
 static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
     rpc_tensor rpc_tensor = serialize_tensor(tensor);
-    if (size > HASH_THRESHOLD) {
+    if (size > get_hash_threshold()) {
         auto request = std::make_shared<rpc_msg_set_tensor_hash_req>();
         request->tensor = rpc_tensor;
         request->offset = offset;
@@ -918,7 +932,7 @@ static void ggml_backend_rpc_free(ggml_backend_t backend) {
 static void ggml_backend_rpc_set_tensor_async(ggml_backend_t backend, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_rpc_context * ctx = (ggml_backend_rpc_context *)backend->context;
     rpc_tensor rpc_tensor = serialize_tensor(tensor);
-    if (size > HASH_THRESHOLD) {
+    if (size > get_hash_threshold()) {
         auto request = std::make_shared<rpc_msg_set_tensor_hash_req>();
         request->tensor = rpc_tensor;
         request->offset = offset;
@@ -1426,7 +1440,7 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
     }
 
     const void * data = input.data() + sizeof(rpc_tensor) + sizeof(offset);
-    if (cache_dir && size > HASH_THRESHOLD) {
+    if (cache_dir && size > get_hash_threshold()) {
         uint64_t hash = fnv_hash((const uint8_t*)data, size);
         char hash_str[17];
         snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
